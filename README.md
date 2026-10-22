@@ -51,10 +51,14 @@ LLM Telephone implements a digital version of the classic "telephone game" using
    ```
 
 4. **Configure API key**
-   Set your OpenRouter API key as an environment variable:
+   Copy the example and set your key (recommended), or export it:
    ```bash
+   cp .env.example .env
+   # Edit .env and set OPENROUTER_API_KEY=your-key
+   # Or:
    export OPENROUTER_API_KEY="your-api-key-here"
    ```
+   Never commit the real key. `.env` is gitignored.
 
 ### Basic Usage
 
@@ -84,32 +88,32 @@ cycle,phase,model,text,score
 3,A→Q,google/gemini-2.0-flash-001,What enables efficient I/O in databases?,5
 ```
 
-## 🏗️ Architecture
+## 📚 Architecture
 
 ```
 llm-telephone/
-├── telephone.py         # 🎯 Main CLI entry point
-├── llm_tel/             # 📦 Core package
-│   ├── engine.py        # 🔄 Telephone game orchestration
-│   ├── client.py        # 🌐 OpenRouter API communication
-│   ├── judge.py         # ⚖️  LLM-as-a-Judge scoring
-│   ├── prompts.py       # 📝 Jinja2 template management
-│   ├── config.py        # ⚙️  System configuration
-│   └── persistence.py   # 💾 Data storage & experiments
-├── experiments/         # 📈 Generated experiment data
-└── requirements.txt     # 📋 Python dependencies
+├── telephone.py          # 🎯 Main CLI entry point
+├── llm_tel/              # 📦 Core package
+│   ├── engine.py         # 🔄 Telephone game orchestration
+│   ├── client.py         # 🌐 OpenRouter API communication
+│   ├── judge.py          # ⚖️  LLM-as-a-Judge scoring
+│   ├── prompts.py        # 📝 Jinja2 template management
+│   ├── config.py         # ⚙️  System configuration
+│   └── persistence.py    # 💾 Data storage & experiments
+├── experiments/          # 📁 Generated experiment data
+└── requirements.txt      # 📦 Python dependencies
 ```
 
-## ✨ Key Features
+## ✅ Key Features
 
 - **🔄 Model Rotation**: Cycles through different LLM providers automatically
 - **⚖️ LLM-as-a-Judge**: GPT-4o-mini evaluates semantic similarity (1-10 scale)
 - **📊 Dual Storage**: Results saved in both CSV and JSONL formats
 - **🛡️ Error Resilience**: Exponential backoff, timeout handling, graceful degradation
-- **⏱️ Real-time Logging**: Immediate data persistence prevents loss
+- **📝 Real-time Logging**: Immediate data persistence prevents loss
 - **🎯 Smart Termination**: Stops when degradation threshold reached or max cycles exceeded
 
-## 📚 Documentation
+## 📖 Documentation
 
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** - Development setup and contribution guidelines
 - **[IMPROVEMENTS.md](IMPROVEMENTS.md)** - Future enhancement roadmap
@@ -125,15 +129,12 @@ We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for:
 - Testing procedures
 - Pull request process
 
-
 ## 📄 License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
-## 🙏 Acknowledgments
+## 🙏 Acknowledgment
 
 - Built for research into LLM behavior and information preservation
 - Uses [OpenRouter](https://openrouter.ai/) for unified LLM API access
 - Inspired by the classic "telephone game" concept
-
----

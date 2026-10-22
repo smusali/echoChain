@@ -32,6 +32,11 @@ __pypackages__/
 .venv
 venv/
 
+# Secrets
+.env
+.envrc
+.env.*.local
+
 # Experiments
 *.csv
 *.jsonl
