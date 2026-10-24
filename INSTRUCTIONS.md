@@ -1,4 +1,4 @@
-# LLM Telephone: Information Degradation Analysis
+# echoChain: Information Degradation Analysis
 
 ## 1. Problem Statement
 Build a small application that **measures how quickly technical information degrades** when it is passed through a “telephone‑game” chain of different large‑language‑model (LLM) APIs.  
@@ -92,7 +92,7 @@ Example:
 ## 4. Command‑Line Example
 
 ```bash
-$ python telephone.py     --start "Redis uses single-threaded event loops with epoll for I/O multiplexing"
+$ python -m echochain --start "Redis uses single-threaded event loops with epoll for I/O multiplexing"
 ```
 
 On completion the script prints the final status and writes results, e.g.:
@@ -108,7 +108,7 @@ DEGRADATION THRESHOLD REACHED (cycle 12) – results saved to experiments/red
    * `README.md` with setup and run instructions.
 
 2. **Functional**  
-   * Works out‑of‑the‑box after `pip install -r requirements.txt`.  
+   * Works out‑of‑the‑box after `pip install -e ".[dev]"`.  
    * Executes **≥ 3 experiments per test case** across **≥ 3 distinct test cases**.
 
 3. **Reporting**  

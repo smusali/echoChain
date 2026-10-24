@@ -12,7 +12,7 @@ Understanding how information degrades when passed through different model combi
 - Scales to handle massive experiment volumes
 - Maintains high availability and fault tolerance
 
-This system is similar to the LLM Telephone challenge but operates at enterprise scale with continuous monitoring and analysis.
+This system is similar to the echoChain challenge but operates at enterprise scale with continuous monitoring and analysis.
 
 ## P2: Requirements Analysis
 

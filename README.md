@@ -1,10 +1,10 @@
-# LLM Telephone 📞
+# echoChain 📞
 
 A research tool that measures how technical information degrades when passed through a "telephone game" chain of different Large Language Models.
 
-## 🎯 What is LLM Telephone?
+## 🎯 What is echoChain?
 
-LLM Telephone implements a digital version of the classic "telephone game" using multiple Large Language Models. It measures how technical information erodes when repeatedly transformed between **Answer → Question → Answer** cycles across different LLM providers.
+echoChain implements a digital version of the classic "telephone game" using multiple Large Language Models. It measures how technical information erodes when repeatedly transformed between **Answer → Question → Answer** cycles across different LLM providers.
 
 ### The Process
 
@@ -35,8 +35,8 @@ LLM Telephone implements a digital version of the classic "telephone game" using
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/yourusername/llm-telephone.git
-   cd llm-telephone
+   git clone https://github.com/smusali/echoChain.git
+   cd echoChain
    ```
 
 2. **Create virtual environment**
@@ -45,9 +45,9 @@ LLM Telephone implements a digital version of the classic "telephone game" using
    source .venv/bin/activate  # On Windows: .venv\Scripts\activate
    ```
 
-3. **Install dependencies**
+3. **Install the package**
    ```bash
-   pip install -r requirements.txt
+   pip install -e ".[dev]"
    ```
 
 4. **Configure API key**
@@ -60,7 +60,7 @@ LLM Telephone implements a digital version of the classic "telephone game" using
 
 ```bash
 # Run a single experiment
-python telephone.py --start "Redis uses single-threaded event loops with epoll for I/O multiplexing"
+echochain --start "Redis uses single-threaded event loops with epoll for I/O multiplexing"
 
 # Check results
 ls experiments/
@@ -87,17 +87,19 @@ cycle,phase,model,text,score
 ## 🏗️ Architecture
 
 ```
-llm-telephone/
-├── telephone.py         # 🎯 Main CLI entry point
-├── llm_tel/             # 📦 Core package
+echoChain/
+├── echochain/           # 📦 Core package
+│   ├── cli.py           # 🎯 Command line
 │   ├── engine.py        # 🔄 Telephone game orchestration
 │   ├── client.py        # 🌐 OpenRouter API communication
 │   ├── judge.py         # ⚖️  LLM-as-a-Judge scoring
 │   ├── prompts.py       # 📝 Jinja2 template management
 │   ├── config.py        # ⚙️  System configuration
 │   └── persistence.py   # 💾 Data storage & experiments
+├── tests/               # 🧪 CLI and version tests
 ├── experiments/         # 📈 Generated experiment data
-└── requirements.txt     # 📋 Python dependencies
+├── CHANGELOG.md         # 📒 Release notes
+└── pyproject.toml       # 📋 Package metadata
 ```
 
 ## ✨ Key Features
@@ -109,8 +111,18 @@ llm-telephone/
 - **⏱️ Real-time Logging**: Immediate data persistence prevents loss
 - **🎯 Smart Termination**: Stops when degradation threshold reached or max cycles exceeded
 
+## Known issues
+
+Version 0.1.0 still measures degradation incorrectly in four ways:
+
+- A judge failure is stored as a score.
+- Questions are scored with the answer rubric.
+- The rotating model and the phase change together, so those two effects are mixed.
+- A run stops on a running mean.
+
 ## 📚 Documentation
 
+- **[CHANGELOG.md](CHANGELOG.md)** - Release notes
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** - Development setup and contribution guidelines
 - **[IMPROVEMENTS.md](IMPROVEMENTS.md)** - Future enhancement roadmap
 - **[INSTRUCTIONS.md](INSTRUCTIONS.md)** - Original project specifications

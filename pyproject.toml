@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "echoChain"
+version = "0.1.0"
+description = "Measure how information degrades across repeated LLM transformations."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Samir Musali", email = "samir.musali@gmail.com" }]
+classifiers = [
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+]
+dependencies = [
+  "openai>=1.22,<3",
+  "httpx>=0.23,<1",
+  "jinja2>=3.1,<4",
+  "backoff>=2.2,<3",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<9"]
+
+[project.scripts]
+echochain = "echochain.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/smusali/echoChain"
+Repository = "https://github.com/smusali/echoChain"
+Issues = "https://github.com/smusali/echoChain/issues"
+Changelog = "https://github.com/smusali/echoChain/blob/main/CHANGELOG.md"
+
+[tool.hatch.build.targets.wheel]
+packages = ["echochain"]
+
+[tool.hatch.build.targets.sdist]
+only-include = [
+  "echochain",
+  "tests",
+  "README.md",
+  "LICENSE",
+  "CHANGELOG.md",
+]
