@@ -314,20 +314,14 @@ class PromptCompiler:
         prompt: str,
         target_model: str,
         template_version: Optional[str] = None,
-        optimization_level: OptimizationLevel = OptimizationLevel.BASIC
+        optimization_level: OptimizationLevel = OptimizationLevel.BASIC,
     ) -> CompilationResult:
         pass
-    
-    def create_template(
-        self,
-        template: TemplateDefinition
-    ) -> Template:
+
+    def create_template(self, template: TemplateDefinition) -> Template:
         pass
-    
-    def ab_test(
-        self,
-        test_config: ABTestConfig
-    ) -> ABTestResult:
+
+    def ab_test(self, test_config: ABTestConfig) -> ABTestResult:
         pass
 ```
 

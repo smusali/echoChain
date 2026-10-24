@@ -1,0 +1,20 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.17.2
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v2.4.0
+    hooks:
+      - id: mypy
+        files: ^(echochain|tests)/
+        pass_filenames: false
+        args: [--strict]
+        additional_dependencies:
+          - openai==3.37.0
+          - jinja2==3.1.6
+          - backoff==2.2.1
+          - pytest==8.4.2
+          - pytest-socket==0.8.1
