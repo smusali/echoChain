@@ -1,6 +1,6 @@
 # Future Improvements
 
-This document outlines potential enhancements to make LLM Telephone more robust, feature-rich, and user-friendly.
+This document outlines potential enhancements to make echoChain more robust, feature-rich, and user-friendly.
 
 ## High-Priority Improvements
 

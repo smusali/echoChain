@@ -11,6 +11,6 @@ STOP_SCORE = 2  # ≤ 2 ⇒ terminate
 OPENROUTER_API_KEY = os.environ["OPENROUTER_API_KEY"]
 OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
 OPENROUTER_HEADERS = {
-    "HTTP-Referer": "https://github.com/smusali/llm-telephone",
-    "X-Title": "LLM Telephone (dev)",
+    "HTTP-Referer": "https://github.com/smusali/echoChain",
+    "X-Title": "echoChain",
 }

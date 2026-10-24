@@ -1,6 +1,6 @@
-# Contributing to LLM Telephone
+# Contributing to echoChain
 
-Thank you for your interest in contributing to LLM Telephone! This guide will help you get started.
+Thank you for your interest in contributing to echoChain! This guide will help you get started.
 
 ## 🚀 Quick Start
 
@@ -12,8 +12,8 @@ Thank you for your interest in contributing to LLM Telephone! This guide will he
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/smusali/llm-telephone.git
-   cd llm-telephone
+   git clone https://github.com/smusali/echoChain.git
+   cd echoChain
    ```
 
 2. **Create virtual environment**
@@ -24,7 +24,7 @@ Thank you for your interest in contributing to LLM Telephone! This guide will he
 
 3. **Install dependencies**
    ```bash
-   pip install -r requirements.txt
+   pip install -e ".[dev]"
    ```
 
 4. **Configure API key**
@@ -34,23 +34,24 @@ Thank you for your interest in contributing to LLM Telephone! This guide will he
 
 5. **Test the setup**
    ```bash
-   python telephone.py --start "Test message"
+   echochain --start "Test message"
    ```
 
 ## 📋 Project Structure
 
 ```
-llm-telephone/
-├── telephone.py          # Main CLI entry point
-├── llm_tel/             # Core package
-│   ├── engine.py        # Telephone game orchestration
-│   ├── client.py        # API communication
-│   ├── judge.py         # LLM-as-a-Judge scoring
-│   ├── prompts.py       # Template management
-│   ├── config.py        # System configuration
-│   └── persistence.py   # Data storage
-├── experiments/         # Generated experiment data
-└── requirements.txt     # Dependencies
+echoChain/
+├── echochain/            # Core package
+│   ├── cli.py            # Command line
+│   ├── engine.py         # Telephone game orchestration
+│   ├── client.py         # API communication
+│   ├── judge.py          # LLM-as-a-Judge scoring
+│   ├── prompts.py        # Template management
+│   ├── config.py         # System configuration
+│   └── persistence.py    # Data storage
+├── tests/                # CLI and version tests
+├── experiments/          # Generated experiment data
+└── pyproject.toml        # Package metadata
 ```
 
 ## 🧪 Running Tests
@@ -59,7 +60,7 @@ Currently, the project uses manual testing. To test:
 
 ```bash
 # Test single experiment
-python telephone.py --start "Redis uses single-threaded event loops"
+echochain --start "Redis uses single-threaded event loops"
 
 # Check experiments directory for output
 ls experiments/
@@ -88,7 +89,7 @@ ls experiments/
 
 4. **Test your changes**
    ```bash
-   python telephone.py --start "Test input"
+   echochain --start "Test input"
    ```
 
 5. **Commit and push**
@@ -130,7 +131,7 @@ def process_response(text: str, model: str) -> dict[str, str]:
 
 **API Hanging**: Some OpenRouter models may hang on certain inputs. This is a known limitation.
 
-**Missing Dependencies**: Run `pip install -r requirements.txt` to ensure all dependencies are installed.
+**Missing Dependencies**: Run `pip install -e ".[dev]"` to install the package and its development tools.
 
 **Permission Errors**: Ensure write permissions for the `experiments/` directory.
 
