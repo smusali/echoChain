@@ -16,25 +16,26 @@ Thank you for your interest in contributing to echoChain! This guide will help y
    cd echoChain
    ```
 
-2. **Create virtual environment**
+2. **Install dependencies**
+   ```bash
+   uv sync --frozen --extra dev
+   ```
+   CI installs from that lock file. With pip, create a virtual environment first:
    ```bash
    python -m venv .venv
    source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-   ```
-
-3. **Install dependencies**
-   ```bash
    pip install -e ".[dev]"
    ```
 
-4. **Configure API key**
+3. **Configure API key**
    ```bash
-   export OPENROUTER_API_KEY="your-api-key-here"
+   cp .env.example .env
    ```
+   Put `OPENROUTER_API_KEY` in `.env`, or export it. A live run needs the key. Tests do not.
 
-5. **Test the setup**
+4. **Install the git hooks**
    ```bash
-   echochain --start "Test message"
+   uv run pre-commit install
    ```
 
 ## 📋 Project Structure
@@ -49,21 +50,18 @@ echoChain/
 │   ├── prompts.py        # Template management
 │   ├── config.py         # System configuration
 │   └── persistence.py    # Data storage
-├── tests/                # CLI and version tests
+├── tests/                # Offline tests
 ├── experiments/          # Generated experiment data
 └── pyproject.toml        # Package metadata
 ```
 
 ## 🧪 Running Tests
 
-Currently, the project uses manual testing. To test:
+The default suite is offline. It does not need an API key, and it fails if a test opens a network connection.
 
 ```bash
-# Test single experiment
-echochain --start "Redis uses single-threaded event loops"
-
-# Check experiments directory for output
-ls experiments/
+uv run pytest
+uv run pre-commit run --all-files
 ```
 
 ## 🎯 How to Contribute
@@ -89,7 +87,8 @@ ls experiments/
 
 4. **Test your changes**
    ```bash
-   echochain --start "Test input"
+   uv run pytest
+   uv run pre-commit run --all-files
    ```
 
 5. **Commit and push**
@@ -105,21 +104,21 @@ ls experiments/
 
 ## 📝 Code Style Guidelines
 
-- **Python**: Follow PEP 8
-- **Imports**: Group standard library, third-party, and local imports
-- **Functions**: Use type hints and docstrings
-- **Comments**: Explain *why*, not *what*
+- **Python**: Ruff enforces the selected lint rules and formats to 88 characters
+- **Types**: mypy runs in strict mode on the package and tests
+- **Hooks**: `pre-commit run --all-files` runs Ruff and mypy
+- **Functions**: Use type hints and docstrings for public functions
 - **Line length**: 88 characters maximum
 
 ### Example Function
 ```python
 def process_response(text: str, model: str) -> dict[str, str]:
     """Process LLM response and extract relevant information.
-    
+
     Args:
         text: Raw response text from LLM
         model: Model identifier used for the response
-        
+
     Returns:
         Processed response data with metadata
     """
@@ -131,7 +130,7 @@ def process_response(text: str, model: str) -> dict[str, str]:
 
 **API Hanging**: Some OpenRouter models may hang on certain inputs. This is a known limitation.
 
-**Missing Dependencies**: Run `pip install -e ".[dev]"` to install the package and its development tools.
+**Missing Dependencies**: Run `uv sync --frozen --extra dev` or `pip install -e ".[dev]"`.
 
 **Permission Errors**: Ensure write permissions for the `experiments/` directory.
 

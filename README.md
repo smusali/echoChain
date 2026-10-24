@@ -1,5 +1,7 @@
 # echoChain 📞
 
+[![CI](https://github.com/smusali/echoChain/actions/workflows/ci.yml/badge.svg)](https://github.com/smusali/echoChain/actions/workflows/ci.yml)
+
 A research tool that measures how technical information degrades when passed through a "telephone game" chain of different Large Language Models.
 
 ## 🎯 What is echoChain?
@@ -49,18 +51,27 @@ echoChain implements a digital version of the classic "telephone game" using mul
    ```bash
    pip install -e ".[dev]"
    ```
+   For a pinned install, use `uv sync --frozen --extra dev` from the lock file.
 
 4. **Configure API key**
-   Set your OpenRouter API key as an environment variable:
+   Copy the example env file and set your key. echoChain reads `OPENROUTER_API_KEY` from the environment or from `.env`. It never accepts the key as a command-line argument.
+   ```bash
+   cp .env.example .env
+   ```
+   You can also export it in the shell:
    ```bash
    export OPENROUTER_API_KEY="your-api-key-here"
    ```
+   `--help` and `--version` work without a key. A run without one exits with code 2.
 
 ### Basic Usage
 
 ```bash
 # Run a single experiment
 echochain --start "Redis uses single-threaded event loops with epoll for I/O multiplexing"
+
+# The same entry point as a module
+python -m echochain --start "Redis uses single-threaded event loops with epoll for I/O multiplexing"
 
 # Check results
 ls experiments/
@@ -78,11 +89,13 @@ Each experiment generates:
 ### Sample Output
 
 ```csv
-cycle,phase,model,text,score
-1,A→Q,google/gemini-2.0-flash-001,How does Redis handle concurrent requests?,8
-2,Q→A,anthropic/claude-sonnet-4,Redis uses asynchronous I/O operations,7
-3,A→Q,google/gemini-2.0-flash-001,What enables efficient I/O in databases?,5
+cycle,phase,model,served_model,text,score
+1,A→Q,google/gemini-3.8-flash,google/gemini-3.8-flash,How does Redis handle concurrent requests?,8
+2,Q→A,deepseek/deepseek-v4.1-flash-1017,deepseek/deepseek-v4.1-flash-1017,Redis uses asynchronous I/O operations,7
+3,A→Q,mistralai/mistral-small-2603,mistralai/mistral-small-2603,What enables efficient I/O in databases?,5
 ```
+
+`model` is the ID that was requested. `served_model` is the ID the provider returned. Runs recorded with `google/gemini-2.0-flash-001` or `anthropic/claude-sonnet-4` cannot be reproduced; those models have been retired. Current Claude Sonnet IDs are not in the rotation because the OpenRouter catalog does not advertise `seed` for them, and every configured model must advertise `response_format` and `seed`.
 
 ## 🏗️ Architecture
 
@@ -96,7 +109,7 @@ echoChain/
 │   ├── prompts.py       # 📝 Jinja2 template management
 │   ├── config.py        # ⚙️  System configuration
 │   └── persistence.py   # 💾 Data storage & experiments
-├── tests/               # 🧪 CLI and version tests
+├── tests/               # 🧪 Offline tests
 ├── experiments/         # 📈 Generated experiment data
 ├── CHANGELOG.md         # 📒 Release notes
 └── pyproject.toml       # 📋 Package metadata
@@ -105,7 +118,7 @@ echoChain/
 ## ✨ Key Features
 
 - **🔄 Model Rotation**: Cycles through different LLM providers automatically
-- **⚖️ LLM-as-a-Judge**: GPT-4o-mini evaluates semantic similarity (1-10 scale)
+- **⚖️ LLM-as-a-Judge**: GPT-4.1 mini evaluates semantic similarity (1-10 scale)
 - **📊 Dual Storage**: Results saved in both CSV and JSONL formats
 - **🛡️ Error Resilience**: Exponential backoff, timeout handling, graceful degradation
 - **⏱️ Real-time Logging**: Immediate data persistence prevents loss
@@ -125,7 +138,6 @@ Version 0.1.0 still measures degradation incorrectly in four ways:
 - **[CHANGELOG.md](CHANGELOG.md)** - Release notes
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** - Development setup and contribution guidelines
 - **[IMPROVEMENTS.md](IMPROVEMENTS.md)** - Future enhancement roadmap
-- **[INSTRUCTIONS.md](INSTRUCTIONS.md)** - Original project specifications
 - **[LICENSE](LICENSE)** - MIT License details
 
 ## 🤝 Contributing

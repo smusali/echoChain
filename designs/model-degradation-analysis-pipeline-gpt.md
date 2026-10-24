@@ -141,9 +141,10 @@ ORDER BY (expt, src_model, tgt_model, hop, ts);
 def setup():
     return {"name": "toxicity_delta", "version": "0.1.0"}
 
+
 def compute(original: str, transformed: str) -> float:
     score_orig = toxicity_model.score(original)
-    score_new  = toxicity_model.score(transformed)
+    score_new = toxicity_model.score(transformed)
     return score_new - score_orig
 ```
 

@@ -133,8 +133,7 @@ Materialized views:
 * Python wheel conforming to:
 
 ```python
-def compute(predictions: List[str], references: List[str]) -> float:
-    ...
+def compute(predictions: List[str], references: List[str]) -> float: ...
 ```
 
 * Uploaded via API → CI security scan → stored in **S3** → scheduled eval workers pull latest plugin manifest at start.

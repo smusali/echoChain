@@ -1,45 +1,75 @@
+from __future__ import annotations
+
 import json
 import logging
 import statistics
 
-from echochain.client import chat
-from echochain.config import JUDGE_MODEL
+from echochain.client import ChatClient, ChatMessage
+from echochain.config import JUDGE_MODEL, redact
 from echochain.prompts import JUDGE_SYS, JUDGE_USER_TMPL
 
 logger = logging.getLogger(__name__)
 
+_FALLBACK_SCORE = 1.0
+_JUDGE_TEMPERATURE = 0.0
+_JSON_FENCE = "```json"
+_FENCE = "```"
 
-def score(original: str, transformed: str, n: int = 1) -> float:
-    msgs = [
+
+def score(original: str, transformed: str, client: ChatClient, n: int = 1) -> float:
+    """Score how much of the original answer remains.
+
+    Args:
+        original: Seed answer.
+        transformed: Current text.
+        client: Chat client used for the judge model.
+        n: Number of judge samples to average.
+
+    Returns:
+        Mean score from 1 to 10. Parse failures count as 1.
+    """
+    messages: list[ChatMessage] = [
         {"role": "system", "content": JUDGE_SYS},
         {
             "role": "user",
             "content": JUDGE_USER_TMPL.render(
-                original=original, transformed=transformed
+                original=original,
+                transformed=transformed,
             ),
         },
     ]
-
-    scores: list[int | float] = []
+    scores: list[float] = []
     for _ in range(n):
-        reply = chat(JUDGE_MODEL, msgs, temperature=0)
-        if not isinstance(reply, str) or not reply.strip():
-            logger.warning("Judge returned empty response, using fallback score")
-            scores.append(1)
-            continue
+        reply = client.chat(JUDGE_MODEL, messages, temperature=_JUDGE_TEMPERATURE)
         try:
-            clean_reply = reply.strip()
-            if clean_reply.startswith("```json") and clean_reply.endswith("```"):
-                clean_reply = clean_reply[7:-3].strip()
-            elif clean_reply.startswith("```") and clean_reply.endswith("```"):
-                clean_reply = clean_reply[3:-3].strip()
+            scores.append(_parse_score(reply.text))
+        except ValueError as exc:
+            logger.warning(
+                "Judge parse error: %s, using fallback score",
+                redact(str(exc)),
+            )
+            scores.append(_FALLBACK_SCORE)
+    if not scores:
+        return _FALLBACK_SCORE
+    return statistics.mean(scores)
 
-            score_value = json.loads(clean_reply)["score"]
-            if isinstance(score_value, bool) or not isinstance(score_value, int | float):
-                raise TypeError("judge score must be a number")
-            scores.append(score_value)
-        except (json.JSONDecodeError, KeyError, TypeError) as exc:
-            logger.warning("Judge parse error: %s, using fallback score", exc)
-            scores.append(1)
 
-    return statistics.mean(scores) if scores else 1.0
+def _parse_score(reply: str) -> float:
+    try:
+        payload: object = json.loads(_strip_fence(reply.strip()))
+    except json.JSONDecodeError as exc:
+        raise ValueError(redact(str(exc))) from exc
+    if not isinstance(payload, dict) or "score" not in payload:
+        raise ValueError("judge score is missing")
+    score_value = payload["score"]
+    if isinstance(score_value, bool) or not isinstance(score_value, int | float):
+        raise ValueError("judge score must be a number")
+    return float(score_value)
+
+
+def _strip_fence(text: str) -> str:
+    if text.startswith(_JSON_FENCE) and text.endswith(_FENCE):
+        return text[len(_JSON_FENCE) : -len(_FENCE)].strip()
+    if text.startswith(_FENCE) and text.endswith(_FENCE):
+        return text[len(_FENCE) : -len(_FENCE)].strip()
+    return text
