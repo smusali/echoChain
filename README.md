@@ -4,7 +4,7 @@
 [![PyPI](https://img.shields.io/pypi/v/echochain.svg)](https://pypi.org/project/echochain/)
 [![Python versions](https://img.shields.io/pypi/pyversions/echochain.svg)](https://pypi.org/project/echochain/)
 
-Research prototype. Runs write raw cycles to `experiments/`. This repository has no study measurements yet.
+Research prototype. Runs write raw cycles to `runs/`. This repository has no study measurements yet.
 
 echoChain passes a technical statement through a telephone-game chain of language models and records a judge score at each step ([`echochain/engine.py`](https://github.com/smusali/echoChain/blob/main/echochain/engine.py)). [Related work](#related-work) names the studies this follows and the three differences in what it is built to measure.
 
@@ -27,9 +27,9 @@ The table below is an illustration of the loop. It is not a recorded experiment.
 | Cycle | Phase | Content |
 |-------|-------|---------|
 | 0 | Seed | `Redis uses single-threaded event loops with epoll for I/O multiplexing` |
-| 1 | A→Q | `How does Redis achieve high concurrency without multiple threads?` |
-| 2 | Q→A | `Redis uses asynchronous I/O and an event-driven architecture` |
-| 3 | A→Q | `What techniques help Redis handle many connections efficiently?` |
+| 1 | a2q | `How does Redis achieve high concurrency without multiple threads?` |
+| 2 | q2a | `Redis uses asynchronous I/O and an event-driven architecture` |
+| 3 | a2q | `What techniques help Redis handle many connections efficiently?` |
 | ... | ... | *[degradation continues]* |
 
 ## Quick start
@@ -90,21 +90,29 @@ echochain --start "Redis uses single-threaded event loops with epoll for I/O mul
 # The same entry point as a module
 python -m echochain --start "Redis uses single-threaded event loops with epoll for I/O multiplexing"
 
+# Stop once spend reaches 2 USD. The process exits with code 3.
+echochain --budget 2 --start "Redis uses single-threaded event loops with epoll for I/O multiplexing"
+
+# Write the run under a chosen root
+echochain --out /tmp/echochain-runs --start "Redis uses single-threaded event loops with epoll for I/O multiplexing"
+
 # Check results
-ls experiments/
-cat experiments/redis_uses_single-threaded_*/chain.csv
+ls runs/
 ```
 
-The `echochain` command is [`echochain.cli:main`](https://github.com/smusali/echoChain/blob/main/echochain/cli.py). `python -m echochain` calls the same function from [`echochain/__main__.py`](https://github.com/smusali/echoChain/blob/main/echochain/__main__.py). A live run calls OpenRouter and spends money. The directory name is the first three words of the seed plus a UTC timestamp ([`mk_exp_dir`](https://github.com/smusali/echoChain/blob/main/echochain/persistence.py)).
+The `echochain` command is [`echochain.cli:main`](https://github.com/smusali/echoChain/blob/main/echochain/cli.py). `python -m echochain` calls the same function from [`echochain/__main__.py`](https://github.com/smusali/echoChain/blob/main/echochain/__main__.py). A live run calls OpenRouter and spends money. Each run is a new directory named with a UTC timestamp and a UUID ([`mk_exp_dir`](https://github.com/smusali/echoChain/blob/main/echochain/persistence.py)). `--out` chooses the parent directory and defaults to `runs`. `--budget` is a USD cap. When spend reaches it, the process records `budget_exceeded` and exits with code 3.
 
 ## Output
 
-Each run creates:
+Each run creates a directory `runs/<UTC>_<run id>/`:
 
-- A timestamped directory under `experiments/` ([`mk_exp_dir`](https://github.com/smusali/echoChain/blob/main/echochain/persistence.py)).
-- `chain.csv` and `chain.jsonl`, both flushed after every cycle ([`Recorder.log`](https://github.com/smusali/echoChain/blob/main/echochain/persistence.py)). [`test_fake_cycle_records_served_model`](https://github.com/smusali/echoChain/blob/main/tests/test_cli.py) reads both files.
+- `manifest.json`, written as soon as the run starts and replaced atomically when it finishes. A crash leaves `status` set to `running`.
+- `chain.jsonl`, one UTF-8 object per step. The object carries the run id, phase (`a2q` or `q2a`), requested and served model, provider, input and output text, prompt hash, finish reason, sampling parameters, latency, tokens, cost, generation id, judge samples, and a UTC timestamp. Fidelity fields are null in this version.
+- `chain.csv`, a short view of the same steps: cycle, phase, model, served model, text, and score.
 
-A crash can still leave an unfinished run. Crash-safe runs are E6 in [#15](https://github.com/smusali/echoChain/issues/15).
+[`Recorder`](https://github.com/smusali/echoChain/blob/main/echochain/persistence.py) writes those files. [`test_fake_cycle_records_served_model`](https://github.com/smusali/echoChain/blob/main/tests/test_cli.py) reads them. The manifest's token and cost totals are the sum of the JSONL rows, including judge calls. Schemas for both documents are in `schemas/`.
+
+A crash can still leave an unfinished run. Resuming a run is E6 in [#15](https://github.com/smusali/echoChain/issues/15).
 
 ### Sample output
 
@@ -112,9 +120,9 @@ The rows below show the file shape and the current model IDs. They are not measu
 
 ```csv
 cycle,phase,model,served_model,text,score
-1,A→Q,google/gemini-3.8-flash,google/gemini-3.8-flash,How does Redis handle concurrent requests?,8
-2,Q→A,deepseek/deepseek-v4.1-flash-1017,deepseek/deepseek-v4.1-flash-1017,Redis uses asynchronous I/O operations,7
-3,A→Q,mistralai/mistral-small-2603,mistralai/mistral-small-2603,What enables efficient I/O in databases?,5
+1,a2q,google/gemini-3.8-flash,google/gemini-3.8-flash,How does Redis handle concurrent requests?,8
+2,q2a,deepseek/deepseek-v4.1-flash-1017,deepseek/deepseek-v4.1-flash-1017,Redis uses asynchronous I/O operations,7
+3,a2q,mistralai/mistral-small-2603,mistralai/mistral-small-2603,What enables efficient I/O in databases?,5
 ```
 
 `model` is the ID that was requested. `served_model` is the ID the provider returned. Those columns are written by [`Recorder.log`](https://github.com/smusali/echoChain/blob/main/echochain/persistence.py) and checked by [`test_fake_cycle_records_served_model`](https://github.com/smusali/echoChain/blob/main/tests/test_cli.py). Current IDs are [`ROTATING_MODELS`](https://github.com/smusali/echoChain/blob/main/echochain/config.py). Runs recorded with `google/gemini-2.0-flash-001` or `anthropic/claude-sonnet-4` cannot be reproduced. Those models have been retired. Current Claude Sonnet IDs are not in the rotation because the OpenRouter catalog does not advertise `seed` for them, and every configured model must advertise `response_format` and `seed` ([`check_models`](https://github.com/smusali/echoChain/blob/main/echochain/client.py), [`test_preflight_missing_seed`](https://github.com/smusali/echoChain/blob/main/tests/test_cli.py)).
@@ -130,9 +138,10 @@ echoChain/
 │   ├── judge.py         # Judge scoring
 │   ├── prompts.py       # Jinja2 templates
 │   ├── config.py        # Models, stop score, cycle limit
-│   └── persistence.py   # CSV and JSONL output
+│   └── persistence.py   # Manifest, CSV, and JSONL output
+├── schemas/             # JSON Schemas for the manifest and JSONL rows
 ├── tests/               # Offline tests
-├── experiments/         # Directories created by a run
+├── runs/                # Directories created by a run
 ├── CHANGELOG.md         # Release notes
 └── pyproject.toml       # Package metadata
 ```
@@ -141,7 +150,8 @@ echoChain/
 
 - **Model rotation.** Each cycle takes the next ID in [`ROTATING_MODELS`](https://github.com/smusali/echoChain/blob/main/echochain/config.py). [`echochain/engine.py`](https://github.com/smusali/echoChain/blob/main/echochain/engine.py) advances that list once per cycle. Cycle 1 uses the first ID. [`test_fake_cycle_records_served_model`](https://github.com/smusali/echoChain/blob/main/tests/test_cli.py) records that ID and the served model. The test stops after one cycle because the fake judge score is 1, which is at or below the stop score.
 - **Judge.** [`score`](https://github.com/smusali/echoChain/blob/main/echochain/judge.py) asks [`JUDGE_MODEL`](https://github.com/smusali/echoChain/blob/main/echochain/config.py) (`openai/gpt-4.1-mini`) for a JSON `score`. The same test stores the score the fake judge returns. The [prompt](https://github.com/smusali/echoChain/blob/main/echochain/prompts.py) asks for an integer from 1 to 10. The code does not check that range. See [Known issues](#known-issues).
-- **Two output files.** [`Recorder.log`](https://github.com/smusali/echoChain/blob/main/echochain/persistence.py) appends the cycle to `chain.csv` and `chain.jsonl` and flushes both. The same test reads both files.
+- **Run record.** [`Recorder.log`](https://github.com/smusali/echoChain/blob/main/echochain/persistence.py) appends the step to `chain.csv` and `chain.jsonl`. `chain.jsonl` is the full record. The same test reads both files and checks the manifest totals.
+- **Budget.** `--budget` stops the run after the call that reaches the cap. Tokens and cost come from the completion response.
 
 ## Known issues
 
@@ -150,7 +160,7 @@ Version 0.1.0 still measures degradation incorrectly in four ways. All four are 
 - **[C1](https://github.com/smusali/echoChain/issues/16).** A judge parse failure is stored as `1` (`_FALLBACK_SCORE` in [`echochain/judge.py`](https://github.com/smusali/echoChain/blob/main/echochain/judge.py)) and enters the running mean in [`echochain/engine.py`](https://github.com/smusali/echoChain/blob/main/echochain/engine.py).
 - **[C3](https://github.com/smusali/echoChain/issues/16).** Every step, including a question, is scored against the seed with the answer prompt ([`echochain/engine.py`](https://github.com/smusali/echoChain/blob/main/echochain/engine.py), [`echochain/prompts.py`](https://github.com/smusali/echoChain/blob/main/echochain/prompts.py)).
 - **[D1](https://github.com/smusali/echoChain/issues/16).** Phase and model are both chosen from the cycle index, so those effects are not isolated ([`echochain/engine.py`](https://github.com/smusali/echoChain/blob/main/echochain/engine.py)).
-- **[D5](https://github.com/smusali/echoChain/issues/16).** The run stops on the running mean, and [`echochain/cli.py`](https://github.com/smusali/echoChain/blob/main/echochain/cli.py) always prints `Degradation complete`.
+- **[D5](https://github.com/smusali/echoChain/issues/16).** The run stops on the running mean. A finished run prints that reason. A budget stop exits with code 3.
 
 ## Related work
 

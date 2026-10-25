@@ -11,6 +11,20 @@ Each dated heading is the UTC calendar day that version was published to PyPI (`
 
 Next release is `0.2.0`, tracked in [Upgrade to v0.2.0](https://github.com/smusali/echoChain/issues/74).
 
+### Added
+
+- Each run writes `manifest.json` and a complete JSONL row under `runs/<UTC>_<run id>/`.
+- `--out` chooses the run root, and `--budget` stops a run with exit code 3.
+
+### Changed
+
+- Chat calls share one client, retry only transient failures, and stop at a wall-clock deadline.
+- Completions record tokens, cost, and finish reason. Empty or truncated replies are tried once more.
+
+### Removed
+
+- The `backoff` dependency.
+
 ## [0.1.0] - 2026-10-25
 
 ### Added

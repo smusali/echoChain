@@ -1,0 +1,135 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "status",
+    "run_id",
+    "slug",
+    "version",
+    "git_sha",
+    "git_dirty",
+    "python",
+    "os",
+    "lock_sha256",
+    "prompt_sha256",
+    "rubric_version",
+    "seed_sha256",
+    "condition",
+    "schedule",
+    "requested_models",
+    "served_models",
+    "providers",
+    "temperatures",
+    "sampling_seed",
+    "max_cycles",
+    "max_tokens",
+    "stop_rule",
+    "judge_panel",
+    "started_at",
+    "ended_at",
+    "prompt_tokens",
+    "completion_tokens",
+    "cost",
+    "errors",
+    "termination_reason",
+    "budget",
+    "deadline_seconds"
+  ],
+  "properties": {
+    "status": {"enum": ["running", "finished"]},
+    "run_id": {"type": "string", "format": "uuid"},
+    "slug": {"type": "string"},
+    "version": {"type": "string"},
+    "git_sha": {"type": ["string", "null"]},
+    "git_dirty": {"type": ["boolean", "null"]},
+    "python": {"type": "string"},
+    "os": {"type": "string"},
+    "lock_sha256": {
+      "anyOf": [
+        {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        {"type": "null"}
+      ]
+    },
+    "prompt_sha256": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["a2q", "q2a", "judge_system", "judge_user"],
+      "properties": {
+        "a2q": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "q2a": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "judge_system": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "judge_user": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "rubric_version": {"type": "string"},
+    "seed_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "condition": {"type": "string"},
+    "schedule": {"type": "array", "items": {"type": "string"}},
+    "requested_models": {"type": "array", "items": {"type": "string"}},
+    "served_models": {"type": "array", "items": {"type": "string"}},
+    "providers": {"type": "array", "items": {"type": "string"}},
+    "temperatures": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["transform", "judge"],
+      "properties": {
+        "transform": {"type": "number"},
+        "judge": {"type": "number"}
+      }
+    },
+    "sampling_seed": {"type": "null"},
+    "max_cycles": {"type": "integer"},
+    "max_tokens": {"type": "integer"},
+    "stop_rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "threshold"],
+      "properties": {
+        "name": {"type": "string"},
+        "threshold": {"type": "number"}
+      }
+    },
+    "judge_panel": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["model", "samples"],
+        "properties": {
+          "model": {"type": "string"},
+          "samples": {"type": "integer"}
+        }
+      }
+    },
+    "started_at": {"type": "string", "format": "date-time"},
+    "ended_at": {
+      "anyOf": [
+        {"type": "string", "format": "date-time"},
+        {"type": "null"}
+      ]
+    },
+    "prompt_tokens": {"type": "integer", "minimum": 0},
+    "completion_tokens": {"type": "integer", "minimum": 0},
+    "cost": {"type": "number", "minimum": 0},
+    "errors": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generation", "judge"],
+      "properties": {
+        "generation": {"type": "integer", "minimum": 0},
+        "judge": {"type": "integer", "minimum": 0}
+      }
+    },
+    "termination_reason": {
+      "enum": ["threshold", "max_cycles", "generation_error", "budget_exceeded", null]
+    },
+    "budget": {
+      "anyOf": [
+        {"type": "number", "minimum": 0},
+        {"type": "null"}
+      ]
+    },
+    "deadline_seconds": {"type": "number", "minimum": 0}
+  }
+}

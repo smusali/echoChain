@@ -88,7 +88,7 @@ A condition or a rotation schedule is not configurable. The loop in [`echochain/
 
 This step calls OpenRouter and spends money. Nothing else in this document does.
 
-There is no `--budget` flag yet (E7 in [#13](https://github.com/smusali/echoChain/issues/13)). A run stops when the running mean of scores is at or below 2, or after 30 cycles, whichever comes first. Plan for up to 30 cycles.
+Pass `--budget` with a USD amount to stop once spend reaches that cap. The process exits with code 3 and records `budget_exceeded`. A run with no budget still stops when the running mean of scores is at or below 2, or after 30 cycles, whichever comes first. Plan for up to 30 cycles.
 
 ```bash
 export OPENROUTER_API_KEY="your-api-key-here"

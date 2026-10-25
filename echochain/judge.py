@@ -3,30 +3,54 @@ from __future__ import annotations
 import json
 import logging
 import statistics
+from collections.abc import Callable
+from dataclasses import dataclass
 
-from echochain.client import ChatClient, ChatMessage
-from echochain.config import JUDGE_MODEL, redact
+from echochain.client import ChatClient, ChatMessage, Completion
+from echochain.config import JUDGE_MODEL, JUDGE_TEMPERATURE, redact
 from echochain.prompts import JUDGE_SYS, JUDGE_USER_TMPL
 
 logger = logging.getLogger(__name__)
 
 _FALLBACK_SCORE = 1.0
-_JUDGE_TEMPERATURE = 0.0
 _JSON_FENCE = "```json"
 _FENCE = "```"
 
 
-def score(original: str, transformed: str, client: ChatClient, n: int = 1) -> float:
+@dataclass(frozen=True)
+class JudgeSample:
+    score: float | None
+    error: str | None
+    completion: Completion
+
+
+@dataclass(frozen=True)
+class Judgement:
+    mean: float
+    samples: tuple[JudgeSample, ...]
+    errors: int
+
+
+def score(
+    original: str,
+    transformed: str,
+    client: ChatClient,
+    charge: Callable[[float], bool],
+    n: int = 1,
+) -> Judgement:
     """Score how much of the original answer remains.
 
     Args:
         original: Seed answer.
         transformed: Current text.
         client: Chat client used for the judge model.
+        charge: Records the cost of one judge call. Returns True when the
+            budget is exhausted.
         n: Number of judge samples to average.
 
     Returns:
-        Mean score from 1 to 10. Parse failures count as 1.
+        Mean score from 1 to 10, the samples, and the parse-error count.
+        Parse failures count as 1.
     """
     messages: list[ChatMessage] = [
         {"role": "system", "content": JUDGE_SYS},
@@ -38,20 +62,28 @@ def score(original: str, transformed: str, client: ChatClient, n: int = 1) -> fl
             ),
         },
     ]
-    scores: list[float] = []
+    samples: list[JudgeSample] = []
     for _ in range(n):
-        reply = client.chat(JUDGE_MODEL, messages, temperature=_JUDGE_TEMPERATURE)
-        try:
-            scores.append(_parse_score(reply.text))
-        except ValueError as exc:
-            logger.warning(
-                "Judge parse error: %s, using fallback score",
-                redact(str(exc)),
-            )
-            scores.append(_FALLBACK_SCORE)
-    if not scores:
-        return _FALLBACK_SCORE
-    return statistics.mean(scores)
+        reply = client.chat(JUDGE_MODEL, messages, temperature=JUDGE_TEMPERATURE)
+        samples.append(_sample(reply))
+        if charge(reply.usage.cost):
+            break
+    values = [sample.score for sample in samples if sample.score is not None]
+    errors = sum(1 for sample in samples if sample.error is not None)
+    mean = _FALLBACK_SCORE if not values else statistics.mean(values)
+    return Judgement(mean=mean, samples=tuple(samples), errors=errors)
+
+
+def _sample(reply: Completion) -> JudgeSample:
+    try:
+        value = _parse_score(reply.text)
+    except ValueError as exc:
+        logger.warning(
+            "Judge parse error: %s, using fallback score",
+            redact(str(exc)),
+        )
+        return JudgeSample(score=_FALLBACK_SCORE, error=str(exc), completion=reply)
+    return JudgeSample(score=value, error=None, completion=reply)
 
 
 def _parse_score(reply: str) -> float:
