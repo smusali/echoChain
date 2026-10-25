@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "run_id",
+    "step",
+    "phase",
+    "requested_model",
+    "served_model",
+    "provider",
+    "input_text",
+    "prompt_sha256",
+    "output_text",
+    "finish_reason",
+    "parameters",
+    "latency_seconds",
+    "prompt_tokens",
+    "completion_tokens",
+    "cost",
+    "generation_id",
+    "judge",
+    "timestamp"
+  ],
+  "properties": {
+    "run_id": {"type": "string", "format": "uuid"},
+    "step": {"type": "integer", "minimum": 1},
+    "phase": {"enum": ["a2q", "q2a"]},
+    "requested_model": {"type": "string"},
+    "served_model": {"type": "string"},
+    "provider": {"type": ["string", "null"]},
+    "input_text": {"type": "string"},
+    "prompt_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "output_text": {"type": "string"},
+    "finish_reason": {"type": "string"},
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["temperature", "max_tokens", "seed"],
+      "properties": {
+        "temperature": {"type": "number"},
+        "max_tokens": {"type": "integer"},
+        "seed": {"type": "null"}
+      }
+    },
+    "latency_seconds": {"type": "number", "minimum": 0},
+    "prompt_tokens": {"type": "integer", "minimum": 0},
+    "completion_tokens": {"type": "integer", "minimum": 0},
+    "cost": {"type": "number", "minimum": 0},
+    "generation_id": {"type": "string"},
+    "judge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "samples",
+        "errors",
+        "fidelity_vs_seed",
+        "fidelity_vs_prev",
+        "answerability"
+      ],
+      "properties": {
+        "samples": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "score",
+              "error",
+              "prompt_tokens",
+              "completion_tokens",
+              "cost",
+              "generation_id",
+              "requested_model",
+              "served_model",
+              "provider",
+              "finish_reason"
+            ],
+            "properties": {
+              "score": {"type": ["number", "null"]},
+              "error": {"type": ["string", "null"]},
+              "prompt_tokens": {"type": "integer", "minimum": 0},
+              "completion_tokens": {"type": "integer", "minimum": 0},
+              "cost": {"type": "number", "minimum": 0},
+              "generation_id": {"type": "string"},
+              "requested_model": {"type": "string"},
+              "served_model": {"type": "string"},
+              "provider": {"type": ["string", "null"]},
+              "finish_reason": {"type": "string"}
+            }
+          }
+        },
+        "errors": {"type": "integer", "minimum": 0},
+        "fidelity_vs_seed": {"type": "null"},
+        "fidelity_vs_prev": {"type": "null"},
+        "answerability": {"type": "null"}
+      }
+    },
+    "timestamp": {"type": "string", "format": "date-time"}
+  }
+}

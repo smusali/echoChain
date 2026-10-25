@@ -10,8 +10,13 @@ ROTATING_MODELS = [
     "mistralai/mistral-small-2603",
 ]
 JUDGE_MODEL = "openai/gpt-4.1-mini"
+JUDGE_SAMPLES = 1
+JUDGE_TEMPERATURE = 0.0
+TRANSFORM_TEMPERATURE = 0.3
 MAX_CYCLES = 30
+MAX_TOKENS = 1024
 STOP_SCORE = 2
+CALL_DEADLINE_SECONDS = 60.0
 OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
 OPENROUTER_HEADERS = {
     "HTTP-Referer": "https://github.com/smusali/echoChain",
