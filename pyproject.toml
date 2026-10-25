@@ -83,6 +83,7 @@ convention = "google"
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["D"]
+"tools/**" = ["D"]
 "echochain/**" = ["D100", "D101", "D104", "D105"]
 "echochain/prompts.py" = ["E501"]
 

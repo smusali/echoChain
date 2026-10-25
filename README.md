@@ -79,7 +79,7 @@ The PyPI project name is `echochain`. That is the [PEP 503](https://peps.python.
    ```bash
    export OPENROUTER_API_KEY="your-api-key-here"
    ```
-   `--help` and `--version` work without a key ([`test_help_without_api_key`](https://github.com/smusali/echoChain/blob/main/tests/test_cli.py), [`test_version_flag`](https://github.com/smusali/echoChain/blob/main/tests/test_cli.py), [`test_module_version`](https://github.com/smusali/echoChain/blob/main/tests/test_cli.py)). A run without one exits with code 2 ([`test_missing_key_exits`](https://github.com/smusali/echoChain/blob/main/tests/test_cli.py)).
+   `--help` and `--version` work without a key ([`test_help_without_api_key`](https://github.com/smusali/echoChain/blob/main/tests/test_cli.py), [`test_version_flag`](https://github.com/smusali/echoChain/blob/main/tests/test_cli.py)). A run without one exits with code 2 ([`test_missing_key_exits`](https://github.com/smusali/echoChain/blob/main/tests/test_cli.py)).
 
 ### Basic usage
 
