@@ -61,9 +61,11 @@ jobs:
           old_user+='username'
           old_title='LLM '
           old_title+='Telephone'
+          other='yymss/'
+          other+="${old_repo}"
           pattern="${old_repo}|${old_pkg}|${old_user}|${old_title}"
-          hits=$(git grep -nE "$pattern" | grep -vE '^(CHANGELOG\.md|docs/origin/)' || true)
-          paths=$(git ls-files | grep -E "$pattern" | grep -vE '^(CHANGELOG\.md|docs/origin/)' || true)
+          hits=$(git grep -nE "$pattern" | grep -vE '^CHANGELOG\.md:' | grep -vF "$other" || true)
+          paths=$(git ls-files | grep -E "$pattern" | grep -vE '^CHANGELOG\.md$' | grep -vF "$other" || true)
           if [ -n "$hits" ] || [ -n "$paths" ]; then
             printf '%s\n' "$hits" "$paths"
             exit 1

@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - The project started as llm-telephone in June 2025 and was renamed to echoChain.
+- Documentation matches the code: README claims, related work, and contributor setup.
 - Rotating models are current OpenRouter snapshots, and the judge is GPT-4.1 mini.
 - Each saved cycle records the requested model and the model that served the call.
 
