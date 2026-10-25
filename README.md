@@ -1,6 +1,8 @@
 # echoChain 📞
 
 [![CI](https://github.com/smusali/echoChain/actions/workflows/ci.yml/badge.svg)](https://github.com/smusali/echoChain/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/echochain.svg)](https://pypi.org/project/echochain/)
+[![Python versions](https://img.shields.io/pypi/pyversions/echochain.svg)](https://pypi.org/project/echochain/)
 
 Research prototype. Runs write raw cycles to `experiments/`. This repository has no study measurements yet.
 
@@ -38,6 +40,16 @@ The table below is an illustration of the loop. It is not a recorded experiment.
 - An OpenRouter API key for a live run ([get one here](https://openrouter.ai/)). `--help`, `--version`, and the test suite do not need a key.
 
 ### Installation
+
+```bash
+pip install echochain
+```
+
+The PyPI project name is `echochain`. That is the [PEP 503](https://peps.python.org/pep-0503/) form of `echoChain`.
+
+[`.github/workflows/release.yml`](https://github.com/smusali/echoChain/blob/main/.github/workflows/release.yml) publishes each release with [Trusted Publishing](https://docs.pypi.org/trusted-publishers/). The workflow uses a GitHub OIDC token and stores no PyPI API token. Sigstore signs each distribution.
+
+### Checkout
 
 1. **Clone the repository**
    ```bash

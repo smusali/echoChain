@@ -5,14 +5,19 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+Each dated heading is the UTC calendar day that version was published to PyPI (`YYYY-MM-DD`). `Unreleased` has no date.
+
 ## [Unreleased]
 
-## [0.1.0] - 2026-10-24
+Next release is `0.2.0`, tracked in [Upgrade to v0.2.0](https://github.com/smusali/echoChain/issues/74).
+
+## [0.1.0] - 2026-10-25
 
 ### Added
 
 - Offline tests, Ruff, mypy, pre-commit, and CI for Python 3.11 through 3.15.
 - `.env.example`, with the API key redacted in logs, errors, and run files.
+- The package is published on PyPI as `echochain`.
 
 ### Changed
 
@@ -26,3 +31,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A fresh install no longer imports `httpx` from the chat client.
 - The API key is read when a run starts, so `--help` works when it is unset.
 - Configured model IDs are checked against the OpenRouter catalog before a paid call.
+
+[Unreleased]: https://github.com/smusali/echoChain/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/smusali/echoChain/releases/tag/v0.1.0
