@@ -1,6 +1,8 @@
 # echoChain 📞
 
 [![CI](https://github.com/smusali/echoChain/actions/workflows/ci.yml/badge.svg)](https://github.com/smusali/echoChain/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/echochain.svg)](https://pypi.org/project/echochain/)
+[![Python versions](https://img.shields.io/pypi/pyversions/echochain.svg)](https://pypi.org/project/echochain/)
 
 Research prototype. Runs write raw cycles to `experiments/`. This repository has no study measurements yet.
 
@@ -39,6 +41,16 @@ The table below is an illustration of the loop. It is not a recorded experiment.
 
 ### Installation
 
+```bash
+pip install echochain
+```
+
+The PyPI project name is `echochain`. That is the [PEP 503](https://peps.python.org/pep-0503/) form of `echoChain`.
+
+[`.github/workflows/release.yml`](https://github.com/smusali/echoChain/blob/main/.github/workflows/release.yml) publishes each release with [Trusted Publishing](https://docs.pypi.org/trusted-publishers/). The workflow uses a GitHub OIDC token and stores no PyPI API token. Sigstore signs each distribution.
+
+### Checkout
+
 1. **Clone the repository**
    ```bash
    git clone https://github.com/smusali/echoChain.git
@@ -67,7 +79,7 @@ The table below is an illustration of the loop. It is not a recorded experiment.
    ```bash
    export OPENROUTER_API_KEY="your-api-key-here"
    ```
-   `--help` and `--version` work without a key ([`test_help_without_api_key`](https://github.com/smusali/echoChain/blob/main/tests/test_cli.py), [`test_version_flag`](https://github.com/smusali/echoChain/blob/main/tests/test_cli.py)). A run without one exits with code 2 ([`test_missing_key_exits`](https://github.com/smusali/echoChain/blob/main/tests/test_cli.py)).
+   `--help` and `--version` work without a key ([`test_help_without_api_key`](https://github.com/smusali/echoChain/blob/main/tests/test_cli.py), [`test_version_flag`](https://github.com/smusali/echoChain/blob/main/tests/test_cli.py), [`test_module_version`](https://github.com/smusali/echoChain/blob/main/tests/test_cli.py)). A run without one exits with code 2 ([`test_missing_key_exits`](https://github.com/smusali/echoChain/blob/main/tests/test_cli.py)).
 
 ### Basic usage
 

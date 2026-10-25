@@ -87,6 +87,23 @@ def test_version_matches_pyproject() -> None:
     assert __version__ == _pyproject_version()
 
 
+def test_module_version(tmp_path: Path) -> None:
+    env = os.environ.copy()
+    env.pop("OPENROUTER_API_KEY", None)
+    env["PYTHONPATH"] = str(_repo_root())
+    completed = subprocess.run(
+        [sys.executable, "-m", "echochain", "--version"],
+        check=False,
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0
+    assert completed.stdout.strip() == f"echochain {_pyproject_version()}"
+    assert completed.stderr == ""
+
+
 def test_version_flag(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

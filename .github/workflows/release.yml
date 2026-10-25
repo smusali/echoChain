@@ -63,7 +63,9 @@ jobs:
     needs: build
     if: contains(github.ref_name, 'rc')
     runs-on: ubuntu-latest
-    environment: testpypi
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/project/echochain/
     permissions:
       id-token: write
       contents: read
@@ -82,7 +84,9 @@ jobs:
     needs: build
     if: ${{ !contains(github.ref_name, 'rc') }}
     runs-on: ubuntu-latest
-    environment: pypi
+    environment:
+      name: pypi
+      url: https://pypi.org/project/echochain/
     permissions:
       id-token: write
       contents: read
@@ -130,7 +134,7 @@ jobs:
               raise SystemExit("project.version must be a string")
           changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
           section = re.compile(
-              rf"^## \[{re.escape(version)}\][^\n]*\n(.*?)(?=^## |\Z)",
+              rf"^## \[{re.escape(version)}\][^\n]*\n(.*?)(?=^## |\n\[[^\]]+\]: |\Z)",
               re.M | re.S,
           )
           match = section.search(changelog)
