@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import json
 import logging
@@ -29,22 +30,40 @@ from echochain.client import (
     parse_catalog,
 )
 from echochain.config import (
+    JUDGE_ERROR_DENOMINATOR,
+    JUDGE_ERROR_NUMERATOR,
     JUDGE_MODEL,
+    MAX_CYCLES,
     MAX_TOKENS,
     MISSING_API_KEY,
     REDACTED,
+    ROTATING_MODELS,
+    SCORE_MAX,
     TRANSFORM_TEMPERATURE,
     configured_models,
     load_api_key,
 )
+from echochain.design import RunSpec, default_spec, load_corpus, model_for, phase_for
 from echochain.engine import cycle
-from echochain.persistence import Recorder, StepRecord, mk_exp_dir, running_manifest
+from echochain.judge import parse_reply
+from echochain.persistence import (
+    ManifestDesign,
+    Recorder,
+    StepRecord,
+    mk_exp_dir,
+    running_manifest,
+)
 from jsonschema import Draft202012Validator
 from openai import APIStatusError
+from openai.types.shared_params.response_format_json_schema import (
+    ResponseFormatJSONSchema,
+)
 from pytest_socket import SocketBlockedError
 
 _EXIT_CONFIG = 2
 _EXIT_BUDGET = 3
+_EXIT_INTERRUPTED = 130
+_MIN_STUDY_SEEDS = 10
 _SEED = "Redis uses epoll"
 _HTTP_OK = 200
 _SLOW_CHUNKS = 40
@@ -126,8 +145,14 @@ class _FakeChat:
         model: str,
         messages: Sequence[ChatMessage],
         temperature: float,
+        *,
+        response_format: ResponseFormatJSONSchema | None = None,
     ) -> Completion:
-        body = '{"score": 1}' if model == JUDGE_MODEL else self._text
+        body = (
+            '{"rationale": "preserved", "score": 1}'
+            if model == JUDGE_MODEL
+            else self._text
+        )
         return _completion(body, model, temperature=temperature, cost=self._cost)
 
 
@@ -241,6 +266,9 @@ def _step(run_id: str, text: str) -> StepRecord:
         "run_id": run_id,
         "step": 1,
         "phase": "a2q",
+        "condition": "alternate",
+        "schedule": "alternate",
+        "score_kind": "answerability",
         "requested_model": "model",
         "served_model": "model-served",
         "provider": "Example",
@@ -419,32 +447,45 @@ def test_fake_cycle_records_served_model(
             recorder,
             _FakeChat("preserved answer", cost=0.5),
             run_id=run.run_id,
-            budget=None,
         )
         recorder.finish(reason)
-    assert reason == "threshold"
+    assert reason == "max_cycles"
     with (run.directory / "chain.csv").open(encoding="utf-8", newline="") as handle:
         rows = list(csv.DictReader(handle))
-    assert len(rows) == 1
+    assert len(rows) == MAX_CYCLES
     requested = configured_models()[0]
     assert rows[0]["model"] == requested
     assert rows[0]["served_model"] == f"{requested}-served"
     assert rows[0]["phase"] == "a2q"
     assert float(rows[0]["score"]) == 1.0
     saved = _read_jsonl(run.directory / "chain.jsonl")
-    assert len(saved) == 1
+    assert len(saved) == MAX_CYCLES
     assert saved[0]["served_model"] == f"{requested}-served"
     assert saved[0]["phase"] == "a2q"
-    _validate(saved[0], "row.schema.json")
+    assert saved[0]["score_kind"] == "answerability"
+    assert saved[0]["condition"] == "alternate"
+    assert saved[0]["schedule"] == "alternate"
+    assert saved[1]["phase"] == "q2a"
+    assert saved[1]["score_kind"] == "fidelity"
+    assert saved[1]["requested_model"] == configured_models()[1]
+    for row in saved:
+        _validate(row, "row.schema.json")
     finished = _read_manifest(run.directory / "manifest.json")
     _validate(finished, "manifest.schema.json")
     prompt_tokens, completion_tokens, cost = _totals(saved)
     assert finished["prompt_tokens"] == prompt_tokens
     assert finished["completion_tokens"] == completion_tokens
     assert finished["cost"] == cost
-    assert finished["termination_reason"] == "threshold"
+    assert finished["termination_reason"] == "max_cycles"
     assert finished["status"] == "finished"
-    assert cost == 1.0
+    schedule = _object(finished["schedule"])
+    assert schedule["name"] == "alternate"
+    assert finished["stop_rule"] == {
+        "name": "fixed_length",
+        "threshold": 2.0,
+        "consecutive": 0,
+    }
+    assert cost == MAX_CYCLES
 
 
 def test_sentinel_is_redacted(
@@ -471,7 +512,6 @@ def test_sentinel_is_redacted(
             recorder,
             _FakeChat(f"answer {sentinel}"),
             run_id=run.run_id,
-            budget=None,
         )
     written = "\n".join(
         path.read_text(encoding="utf-8")
@@ -551,6 +591,7 @@ def test_retries_follow_status(
     for body in bodies:
         assert body["max_tokens"] == MAX_TOKENS
         assert body["temperature"] == TRANSFORM_TEMPERATURE
+        assert "response_format" not in body
 
 
 def test_slow_stream_stops_at_deadline() -> None:
@@ -651,7 +692,6 @@ def test_bad_completion_retries_once(
                 recorder,
                 client,
                 run_id=run.run_id,
-                budget=None,
             )
         recorder.finish(reason)
     assert reason == "generation_error"
@@ -659,6 +699,7 @@ def test_bad_completion_retries_once(
     for body in bodies:
         assert body["max_tokens"] == MAX_TOKENS
         assert body["temperature"] == TRANSFORM_TEMPERATURE
+        assert "response_format" not in body
     finished = _read_manifest(run.directory / "manifest.json")
     _validate(finished, "manifest.schema.json")
     assert finished["termination_reason"] == "generation_error"
@@ -818,3 +859,448 @@ def test_crash_leaves_running_manifest(tmp_path: Path) -> None:
     assert payload["status"] == "running"
     assert payload["termination_reason"] is None
     assert payload["ended_at"] is None
+
+
+class _Scripted:
+    def __init__(
+        self,
+        judge_text: str | None = None,
+        replies: Sequence[str] | None = None,
+        *,
+        echo: bool = False,
+    ) -> None:
+        self._replies = list(replies or [])
+        self._judge_text = judge_text
+        self._echo = echo
+        self.seen: list[str] = []
+
+    def __enter__(self) -> _Scripted:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        return None
+
+    def chat(
+        self,
+        model: str,
+        messages: Sequence[ChatMessage],
+        temperature: float,
+        *,
+        response_format: ResponseFormatJSONSchema | None = None,
+    ) -> Completion:
+        content = messages[-1]["content"]
+        if model != JUDGE_MODEL:
+            text = content
+            if self._echo:
+                marker = "Text:\n"
+                text = content.split(marker, 1)[1] if marker in content else content
+            return _completion(text, model, temperature=temperature)
+        self.seen.append(content)
+        if self._replies:
+            body = self._replies.pop(0)
+        elif self._judge_text is not None:
+            body = self._judge_text
+        else:
+            body = '{"rationale": "ok", "score": 8}'
+        return _completion(body, model, temperature=temperature)
+
+
+class _Interrupt:
+    def __enter__(self) -> _Interrupt:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        return None
+
+    def chat(
+        self,
+        model: str,
+        messages: Sequence[ChatMessage],
+        temperature: float,
+        *,
+        response_format: ResponseFormatJSONSchema | None = None,
+    ) -> Completion:
+        raise KeyboardInterrupt
+
+
+def _install_client(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    client: object,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+
+    def fetch(_api_key: str) -> dict[str, ModelRecord]:
+        return _catalog(_full_parameters())
+
+    monkeypatch.setattr("echochain.client.fetch_catalog", fetch)
+    monkeypatch.setattr("echochain.client.OpenRouterClient", lambda _api_key: client)
+
+
+def _run_cycle(
+    tmp_path: Path,
+    client: _Scripted,
+    spec: RunSpec | None = None,
+) -> tuple[str, list[dict[str, object]], dict[str, object]]:
+    plan = default_spec() if spec is None else spec
+    run = mk_exp_dir(_SEED, tmp_path)
+    manifest = running_manifest(
+        run_id=run.run_id,
+        slug=run.slug,
+        seed=_SEED,
+        budget=plan.budget,
+        design=ManifestDesign(
+            condition=plan.condition.name,
+            schedule_name=plan.condition.schedule,
+            schedule_models=plan.models,
+            transform_temperature=plan.condition.temperature,
+            seed_id=plan.seed_id,
+            corpus_version=plan.corpus_version,
+            corpus_sha256=plan.corpus_sha256,
+            stop_consecutive=plan.stop_consecutive,
+        ),
+    )
+    with Recorder(run.directory, manifest) as recorder:
+        reason = cycle(
+            _SEED,
+            recorder,
+            client,
+            run_id=run.run_id,
+            spec=plan,
+        )
+        recorder.finish(reason)
+    saved = _read_jsonl(run.directory / "chain.jsonl")
+    for row in saved:
+        _validate(row, "row.schema.json")
+    finished = _read_manifest(run.directory / "manifest.json")
+    _validate(finished, "manifest.schema.json")
+    return reason, saved, finished
+
+
+def _pair_counts(
+    schedule: str, models: tuple[str, ...], steps: int
+) -> dict[tuple[str, str], int]:
+    counts: dict[tuple[str, str], int] = {}
+    for step in range(1, steps + 1):
+        phase = phase_for("telephone", step)
+        key = (model_for(schedule, models, step), phase)
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+@pytest.mark.parametrize(
+    ("reply", "score", "error"),
+    [
+        ("", None, "empty"),
+        ("   ", None, "empty"),
+        ('```json\n{"rationale": "kept", "score": 8}\n```', 8, None),
+        ("the score is high", None, "invalid_json"),
+        ('{"rationale": "no", "score": "eleven"}', None, "not_integer"),
+        ('{"rationale": "no", "score": "8"}', None, "not_integer"),
+        ('{"rationale": "no", "score": 8.5}', None, "not_integer"),
+        ('{"rationale": "no", "score": 42}', None, "out_of_range"),
+        ('{"rationale": "no", "score": 0}', None, "out_of_range"),
+        ('{"rationale": "no"}', None, "missing_key"),
+        ('{"score": 8}', None, "missing_key"),
+        ('{"rationale": "kept", "score": 8}', 8, None),
+        ('{"rationale": "kept", "score": true}', None, "not_integer"),
+        ("[1, 2]", None, "not_object"),
+    ],
+)
+def test_parse_reply(reply: str, score: int | None, error: str | None) -> None:
+    assert parse_reply(reply) == (score, error)
+
+
+def test_empty_judge_reply_continues(tmp_path: Path) -> None:
+    reason, saved, _finished = _run_cycle(tmp_path, _Scripted(replies=[""]))
+    assert reason == "max_cycles"
+    assert len(saved) == MAX_CYCLES
+    judge = _object(saved[0]["judge"])
+    samples = judge["samples"]
+    assert isinstance(samples, list)
+    sample = _object(samples[0])
+    assert sample["score"] is None
+    assert sample["error"] == "empty"
+    assert judge["answerability"] is None
+    assert judge["fidelity_vs_seed"] is None
+
+
+def test_judge_failures_stop_at_the_share(tmp_path: Path) -> None:
+    reason, saved, finished = _run_cycle(tmp_path, _Scripted(judge_text=""))
+    stopped = MAX_CYCLES * JUDGE_ERROR_NUMERATOR // JUDGE_ERROR_DENOMINATOR + 1
+    assert reason == "judge_error"
+    assert len(saved) == stopped
+    assert finished["termination_reason"] == "judge_error"
+    assert finished["errors"] == {"generation": 0, "judge": stopped}
+
+
+def test_non_numeric_judge_score_finishes(tmp_path: Path) -> None:
+    reason, saved, _finished = _run_cycle(
+        tmp_path, _Scripted(judge_text='{"score": "eleven"}')
+    )
+    assert reason == "judge_error"
+    samples = _object(saved[0]["judge"])["samples"]
+    assert isinstance(samples, list)
+    sample = _object(samples[0])
+    assert sample["score"] is None
+    assert sample["error"] == "not_integer"
+
+
+def test_questions_use_the_answerability_rubric(tmp_path: Path) -> None:
+    asked = 4
+    kept = 9
+    client = _Scripted(
+        replies=[
+            f'{{"rationale": "asks", "score": {asked}}}',
+            f'{{"rationale": "kept", "score": {kept}}}',
+        ]
+    )
+    both_phases = 2
+    reason, saved, _finished = _run_cycle(
+        tmp_path, client, default_spec(max_cycles=both_phases)
+    )
+    assert reason == "max_cycles"
+    assert "Transformed Answer" not in client.seen[0]
+    assert "Seed Answer" in client.seen[0]
+    assert "Transformed Answer" in client.seen[1]
+    assert saved[0]["score_kind"] == "answerability"
+    assert saved[1]["score_kind"] == "fidelity"
+    question = _object(saved[0]["judge"])
+    answer = _object(saved[1]["judge"])
+    assert question["answerability"] == asked
+    assert question["fidelity_vs_seed"] is None
+    assert answer["fidelity_vs_seed"] == kept
+    assert answer["answerability"] is None
+
+
+def test_schedules_fill_the_design_matrix() -> None:
+    two = ("a", "b")
+    three = ("a", "b", "c")
+    assert set(_pair_counts("alternate", two, MAX_CYCLES)) == {
+        ("a", "a2q"),
+        ("b", "q2a"),
+    }
+    assert set(_pair_counts("swap", two, MAX_CYCLES)) == {("b", "a2q"), ("a", "q2a")}
+    assert set(_pair_counts("factorial", two, MAX_CYCLES)) == {
+        ("a", "a2q"),
+        ("a", "q2a"),
+        ("b", "a2q"),
+        ("b", "q2a"),
+    }
+    cells = len(three) * len({"a2q", "q2a"})
+    wide = _pair_counts("factorial", three, MAX_CYCLES)
+    assert len(wide) == cells
+    assert all(count > 0 for count in wide.values())
+    latin = _pair_counts("latin", three, MAX_CYCLES)
+    assert len(latin) == cells
+    assert len(set(latin.values())) == 1
+    assert set(_pair_counts("fixed:only", three, MAX_CYCLES)) == {
+        ("only", "a2q"),
+        ("only", "q2a"),
+    }
+    alternate = [model_for("alternate", three, step) for step in range(1, 7)]
+    latin_models = [model_for("latin", three, step) for step in range(1, 7)]
+    assert alternate != latin_models
+    assert model_for("alternate", ROTATING_MODELS, 1) == ROTATING_MODELS[0]
+
+
+def test_conditions_are_labeled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _install_client(monkeypatch, tmp_path, _FakeChat("preserved answer"))
+    assert main(["--start", _SEED, "--condition", "all", "--out", str(tmp_path)]) == 0
+    expected = {"alternate", "same-model", "identity", "paraphrase"}
+    runs = [path for path in tmp_path.iterdir() if path.is_dir()]
+    assert len(runs) == len(expected)
+    labels: set[str] = set()
+    for run in runs:
+        finished = _read_manifest(run / "manifest.json")
+        _validate(finished, "manifest.schema.json")
+        saved = _read_jsonl(run / "chain.jsonl")
+        _validate(saved[0], "row.schema.json")
+        assert saved[0]["condition"] == finished["condition"]
+        assert isinstance(finished["condition"], str)
+        labels.add(finished["condition"])
+        if finished["condition"] == "identity":
+            assert saved[0]["phase"] == "identity"
+            assert _object(saved[0]["parameters"])["temperature"] == 0
+        if finished["condition"] == "paraphrase":
+            assert saved[0]["phase"] == "paraphrase"
+            assert saved[0]["score_kind"] == "fidelity"
+    assert labels == expected
+
+
+def test_identity_echo_scores_perfectly(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _install_client(
+        monkeypatch,
+        tmp_path,
+        _Scripted(
+            judge_text=f'{{"rationale": "same", "score": {SCORE_MAX}}}',
+            echo=True,
+        ),
+    )
+    assert (
+        main(["--start", _SEED, "--condition", "identity", "--out", str(tmp_path)]) == 0
+    )
+    run = next(path for path in tmp_path.iterdir() if path.is_dir())
+    saved = _read_jsonl(run / "chain.jsonl")
+    assert len(saved) == MAX_CYCLES
+    for row in saved:
+        assert row["phase"] == "identity"
+        assert row["score_kind"] == "fidelity"
+        assert row["output_text"] == _SEED
+        assert _object(row["judge"])["fidelity_vs_seed"] == SCORE_MAX
+        assert _object(row["parameters"])["temperature"] == 0
+
+
+def test_low_fidelity_streak_stops(tmp_path: Path) -> None:
+    spec = default_spec(stop_consecutive=1)
+    reason, saved, finished = _run_cycle(
+        tmp_path,
+        _Scripted(judge_text='{"rationale": "low", "score": 1}'),
+        spec,
+    )
+    assert reason == "threshold"
+    assert len(saved) == spec.stop_consecutive + 1
+    assert saved[0]["score_kind"] == "answerability"
+    assert saved[1]["score_kind"] == "fidelity"
+    assert finished["termination_reason"] == "threshold"
+    assert _object(finished["stop_rule"])["consecutive"] == 1
+
+
+def test_interrupt_records_the_reason(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _install_client(monkeypatch, tmp_path, _Interrupt())
+    assert main(["--start", _SEED, "--out", str(tmp_path)]) == _EXIT_INTERRUPTED
+    assert "interrupted" in capsys.readouterr().err
+    run = next(path for path in tmp_path.iterdir() if path.is_dir())
+    finished = _read_manifest(run / "manifest.json")
+    _validate(finished, "manifest.schema.json")
+    assert finished["status"] == "finished"
+    assert finished["termination_reason"] == "interrupted"
+
+
+def test_dry_run_counts_calls(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    assert main(["--dry-run", "--start", _SEED, "--out", str(tmp_path)]) == 0
+    output = capsys.readouterr().out
+    assert "runs: 1" in output
+    assert f"calls: {MAX_CYCLES * 2}" in output
+    assert "cost_upper_bound_usd: unknown" in output
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_dry_run_bounds_cost(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+
+    def fetch(_api_key: str) -> dict[str, ModelRecord]:
+        priced: dict[str, ModelRecord] = {}
+        for model_id, record in _catalog(_full_parameters()).items():
+            priced[model_id] = ModelRecord(
+                model_id=record.model_id,
+                parameters=record.parameters,
+                prompt_price=0.000001,
+                completion_price=0.000002,
+            )
+        return priced
+
+    monkeypatch.setattr("echochain.client.fetch_catalog", fetch)
+    assert main(["--dry-run", "--start", _SEED]) == 0
+    expected = MAX_CYCLES * 2 * MAX_TOKENS * 0.000003
+    assert f"cost_upper_bound_usd: {expected:.6f}" in capsys.readouterr().out
+
+
+def test_corpus_is_versioned(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    corpus = load_corpus()
+    ids = [seed.id for seed in corpus.seeds]
+    assert len(ids) == len(set(ids))
+    assert corpus.version == "v1"
+    study = [seed for seed in corpus.seeds if seed.split == "study"]
+    held_out = [seed for seed in corpus.seeds if seed.split == "held-out"]
+    assert len(study) >= _MIN_STUDY_SEEDS
+    assert held_out
+    for seed in corpus.seeds:
+        assert seed.domain.strip()
+        assert seed.text.strip()
+    digest = hashlib.sha256(corpus.path.read_bytes()).hexdigest()
+    assert corpus.sha256 == digest
+    assert load_corpus().sha256 == corpus.sha256
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    assert main(["--dry-run", "--seed", "redis-epoll"]) == 0
+    assert f"calls: {MAX_CYCLES * 2}" in capsys.readouterr().out
+    assert main(["--dry-run", "--seed", "missing"]) == _EXIT_CONFIG
+
+
+def test_judge_requests_strict_schema(tmp_path: Path) -> None:
+    bodies: list[dict[str, object]] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        bodies.append(_object(json.loads(request.content)))
+        return httpx2.Response(
+            _HTTP_OK,
+            json=_chat_payload('{"rationale": "ok", "score": 8}'),
+        )
+
+    run = mk_exp_dir(_SEED, tmp_path)
+    manifest = running_manifest(
+        run_id=run.run_id,
+        slug=run.slug,
+        seed=_SEED,
+        budget=None,
+    )
+    with Recorder(run.directory, manifest) as recorder:
+        with OpenRouterClient(
+            "test-key",
+            transport=httpx2.MockTransport(handler),
+            deadline=5.0,
+        ) as client:
+            reason = cycle(
+                _SEED,
+                recorder,
+                client,
+                run_id=run.run_id,
+                spec=default_spec(max_cycles=1),
+            )
+        recorder.finish(reason)
+    assert reason == "max_cycles"
+    assert "response_format" not in bodies[0]
+    response_format = _object(bodies[1]["response_format"])
+    assert response_format["type"] == "json_schema"
+    schema = _object(response_format["json_schema"])
+    assert schema["strict"] is True
+    assert schema["name"] == "judge_score"
+    provider = _object(bodies[1]["provider"])
+    assert provider["require_parameters"] is True

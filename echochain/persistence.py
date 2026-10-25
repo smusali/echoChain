@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
-from typing import TypedDict
+from typing import Literal, TypedDict
 
 from echochain import __version__
 from echochain.config import (
@@ -23,6 +23,7 @@ from echochain.config import (
     MAX_CYCLES,
     MAX_TOKENS,
     ROTATING_MODELS,
+    STOP_CONSECUTIVE,
     STOP_SCORE,
     TRANSFORM_TEMPERATURE,
     configured_models,
@@ -30,17 +31,30 @@ from echochain.config import (
 )
 from echochain.prompts import (
     A_TO_Q_SOURCE,
+    ANSWERABILITY_USER_SOURCE,
+    IDENTITY_SOURCE,
     JUDGE_SYS,
     JUDGE_USER_SOURCE,
+    PARAPHRASE_SOURCE,
     Q_TO_A_SOURCE,
     RUBRIC_VERSION,
 )
 
 _FIELDNAMES = ("cycle", "phase", "model", "served_model", "text", "score")
 _SLUG_WORDS = 3
-_CONDITION = "alternating-phase"
-_STOP_RULE = "running_mean"
+_DEFAULT_CONDITION = "alternate"
+_FIXED_LENGTH = "fixed_length"
+_CONSECUTIVE_FIDELITY = "consecutive_fidelity"
 _GIT_TIMEOUT_SECONDS = 5
+
+TerminationReason = Literal[
+    "threshold",
+    "max_cycles",
+    "generation_error",
+    "judge_error",
+    "budget_exceeded",
+    "interrupted",
+]
 
 
 class EmptySeedError(RuntimeError):
@@ -54,7 +68,7 @@ class ParametersRecord(TypedDict):
 
 
 class JudgeSampleRecord(TypedDict):
-    score: float | None
+    score: int | None
     error: str | None
     prompt_tokens: int
     completion_tokens: int
@@ -69,15 +83,18 @@ class JudgeSampleRecord(TypedDict):
 class JudgeRecord(TypedDict):
     samples: list[JudgeSampleRecord]
     errors: int
-    fidelity_vs_seed: None
+    fidelity_vs_seed: float | None
     fidelity_vs_prev: None
-    answerability: None
+    answerability: float | None
 
 
 class StepRecord(TypedDict):
     run_id: str
     step: int
     phase: str
+    condition: str
+    schedule: str
+    score_kind: str
     requested_model: str
     served_model: str
     provider: str | None
@@ -100,6 +117,9 @@ class PromptHashes(TypedDict):
     q2a: str
     judge_system: str
     judge_user: str
+    answerability: str
+    identity: str
+    paraphrase: str
 
 
 class Temperatures(TypedDict):
@@ -107,9 +127,15 @@ class Temperatures(TypedDict):
     judge: float
 
 
+class ScheduleRecord(TypedDict):
+    name: str
+    models: list[str]
+
+
 class StopRule(TypedDict):
     name: str
     threshold: float
+    consecutive: int
 
 
 class JudgePanelMember(TypedDict):
@@ -135,8 +161,11 @@ class Manifest(TypedDict):
     prompt_sha256: PromptHashes
     rubric_version: str
     seed_sha256: str
+    seed_id: str | None
+    corpus_version: str | None
+    corpus_sha256: str | None
     condition: str
-    schedule: list[str]
+    schedule: ScheduleRecord
     requested_models: list[str]
     served_models: list[str]
     providers: list[str]
@@ -152,9 +181,21 @@ class Manifest(TypedDict):
     completion_tokens: int
     cost: float
     errors: ErrorCounts
-    termination_reason: str | None
+    termination_reason: TerminationReason | None
     budget: float | None
     deadline_seconds: float
+
+
+@dataclass(frozen=True)
+class ManifestDesign:
+    condition: str = _DEFAULT_CONDITION
+    schedule_name: str = _DEFAULT_CONDITION
+    schedule_models: tuple[str, ...] | None = None
+    transform_temperature: float = TRANSFORM_TEMPERATURE
+    seed_id: str | None = None
+    corpus_version: str | None = None
+    corpus_sha256: str | None = None
+    stop_consecutive: int = STOP_CONSECUTIVE
 
 
 @dataclass(frozen=True)
@@ -196,6 +237,9 @@ def prompt_hashes() -> PromptHashes:
         "q2a": sha256_text(Q_TO_A_SOURCE),
         "judge_system": sha256_text(JUDGE_SYS),
         "judge_user": sha256_text(JUDGE_USER_SOURCE),
+        "answerability": sha256_text(ANSWERABILITY_USER_SOURCE),
+        "identity": sha256_text(IDENTITY_SOURCE),
+        "paraphrase": sha256_text(PARAPHRASE_SOURCE),
     }
 
 
@@ -205,6 +249,7 @@ def running_manifest(
     slug: str,
     seed: str,
     budget: float | None,
+    design: ManifestDesign | None = None,
 ) -> Manifest:
     """Build the manifest written when a run starts.
 
@@ -213,10 +258,17 @@ def running_manifest(
         slug: Cleaned seed label stored only in the manifest.
         seed: Seed text. Only its hash is stored.
         budget: USD cap. None means no cap.
+        design: Condition, schedule, corpus, and stop rule. Defaults to a
+            fixed-length alternating run.
 
     Returns:
         A manifest with status running.
     """
+    chosen = ManifestDesign() if design is None else design
+    models = list(
+        ROTATING_MODELS if chosen.schedule_models is None else chosen.schedule_models
+    )
+    stop_name = _CONSECUTIVE_FIDELITY if chosen.stop_consecutive > 0 else _FIXED_LENGTH
     root = _project_root()
     git_sha, git_dirty = _git_state(root)
     return {
@@ -232,19 +284,26 @@ def running_manifest(
         "prompt_sha256": prompt_hashes(),
         "rubric_version": RUBRIC_VERSION,
         "seed_sha256": sha256_text(seed),
-        "condition": _CONDITION,
-        "schedule": list(ROTATING_MODELS),
+        "seed_id": chosen.seed_id,
+        "corpus_version": chosen.corpus_version,
+        "corpus_sha256": chosen.corpus_sha256,
+        "condition": chosen.condition,
+        "schedule": {"name": chosen.schedule_name, "models": models},
         "requested_models": list(configured_models()),
         "served_models": [],
         "providers": [],
         "temperatures": {
-            "transform": TRANSFORM_TEMPERATURE,
+            "transform": chosen.transform_temperature,
             "judge": JUDGE_TEMPERATURE,
         },
         "sampling_seed": None,
         "max_cycles": MAX_CYCLES,
         "max_tokens": MAX_TOKENS,
-        "stop_rule": {"name": _STOP_RULE, "threshold": float(STOP_SCORE)},
+        "stop_rule": {
+            "name": stop_name,
+            "threshold": STOP_SCORE,
+            "consecutive": chosen.stop_consecutive,
+        },
         "judge_panel": [{"model": JUDGE_MODEL, "samples": JUDGE_SAMPLES}],
         "started_at": utc_now(),
         "ended_at": None,
@@ -351,7 +410,7 @@ class Recorder:
         self.jl.flush()
         os.fsync(self.jl.fileno())
 
-    def finish(self, reason: str) -> None:
+    def finish(self, reason: TerminationReason) -> None:
         """Write the final manifest.
 
         Args:
@@ -420,14 +479,17 @@ def _redact_row(record: StepRecord) -> StepRecord:
     judge: JudgeRecord = {
         "samples": samples,
         "errors": record["judge"]["errors"],
-        "fidelity_vs_seed": None,
+        "fidelity_vs_seed": record["judge"]["fidelity_vs_seed"],
         "fidelity_vs_prev": None,
-        "answerability": None,
+        "answerability": record["judge"]["answerability"],
     }
     return {
         "run_id": record["run_id"],
         "step": record["step"],
         "phase": redact(record["phase"]),
+        "condition": redact(record["condition"]),
+        "schedule": redact(record["schedule"]),
+        "score_kind": record["score_kind"],
         "requested_model": redact(record["requested_model"]),
         "served_model": redact(record["served_model"]),
         "provider": _redact_optional(record["provider"]),

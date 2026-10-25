@@ -4,20 +4,20 @@
 [![PyPI](https://img.shields.io/pypi/v/echochain.svg)](https://pypi.org/project/echochain/)
 [![Python versions](https://img.shields.io/pypi/pyversions/echochain.svg)](https://pypi.org/project/echochain/)
 
-Research prototype. Runs write raw cycles to `runs/`. This repository has no study measurements yet.
+Research prototype. Runs write raw cycles to `runs/`.
 
-echoChain passes a technical statement through a telephone-game chain of language models and records a judge score at each step ([`echochain/engine.py`](https://github.com/smusali/echoChain/blob/main/echochain/engine.py)). [Related work](#related-work) names the studies this follows and the three differences in what it is built to measure.
+echoChain passes a technical statement through a telephone-game chain of language models and records a judge score at each step ([`echochain/engine.py`](https://github.com/smusali/echoChain/blob/main/echochain/engine.py)). [Related work](#related-work) names the studies this follows and the differences in what it is built to measure.
 
 ## What is echoChain?
 
-The loop starts from a technical statement, turns that statement into a question, turns the question back into an answer, and repeats. [`echochain/engine.py`](https://github.com/smusali/echoChain/blob/main/echochain/engine.py) runs the loop. A judge model is asked for a JSON score of how much of the seed remains. The score is not a validated measurement. See [Known issues](#known-issues).
+The loop starts from a technical statement, turns that statement into a question, turns the question back into an answer, and repeats. [`echochain/engine.py`](https://github.com/smusali/echoChain/blob/main/echochain/engine.py) runs the loop. A judge scores each answer step for fidelity to the seed and each question step for whether the seed would answer it. Those are 1 to 10 ratings from one model. They are not a human-validated measurement.
 
 ### The process
 
 1. **Start** with a technical statement (for example, "Redis uses single-threaded event loops with epoll for I/O multiplexing").
 2. **Transform** an answer into a question with the prompt in [`echochain/prompts.py`](https://github.com/smusali/echoChain/blob/main/echochain/prompts.py).
 3. **Transform** that question back into an answer with the other prompt in the same file.
-4. **Repeat.** The loop stops when the running mean of scores is at or below 2, or after 30 cycles ([`STOP_SCORE`](https://github.com/smusali/echoChain/blob/main/echochain/config.py) and [`MAX_CYCLES`](https://github.com/smusali/echoChain/blob/main/echochain/config.py) in [`echochain/config.py`](https://github.com/smusali/echoChain/blob/main/echochain/config.py)). See [Known issues](#known-issues).
+4. **Repeat** for 30 steps ([`MAX_CYCLES`](https://github.com/smusali/echoChain/blob/main/echochain/config.py)). The run can also stop when spend hits `--budget`, a generation fails, judge failures exceed one tenth of the planned steps, or the process is interrupted. The manifest records that reason.
 5. **Record** each cycle. The judge call is described under [Key features](#key-features).
 
 ### Example chain
@@ -93,6 +93,15 @@ python -m echochain --start "Redis uses single-threaded event loops with epoll f
 # Stop once spend reaches 2 USD. The process exits with code 3.
 echochain --budget 2 --start "Redis uses single-threaded event loops with epoll for I/O multiplexing"
 
+# Run one corpus seed on the alternating schedule
+echochain --seed redis-epoll
+
+# Run the treatment and the three controls
+echochain --seed redis-epoll --condition all
+
+# Print the call count and cost bound, then exit
+echochain --dry-run --split study --condition alternate --condition swap --condition same-model --repeats 3
+
 # Write the run under a chosen root
 echochain --out /tmp/echochain-runs --start "Redis uses single-threaded event loops with epoll for I/O multiplexing"
 
@@ -107,7 +116,7 @@ The `echochain` command is [`echochain.cli:main`](https://github.com/smusali/ech
 Each run creates a directory `runs/<UTC>_<run id>/`:
 
 - `manifest.json`, written as soon as the run starts and replaced atomically when it finishes. A crash leaves `status` set to `running`.
-- `chain.jsonl`, one UTF-8 object per step. The object carries the run id, phase (`a2q` or `q2a`), requested and served model, provider, input and output text, prompt hash, finish reason, sampling parameters, latency, tokens, cost, generation id, judge samples, and a UTC timestamp. Fidelity fields are null in this version.
+- `chain.jsonl`, one UTF-8 object per step. The object carries the run id, phase (`a2q`, `q2a`, `identity`, or `paraphrase`), condition, schedule, `score_kind`, requested and served model, provider, input and output text, prompt hash, finish reason, sampling parameters, latency, tokens, cost, generation id, judge samples, and a UTC timestamp. An answer step stores `fidelity_vs_seed`. A question step stores `answerability`. The other of those two fields is null. A failed judge sample stores a null score and an error code.
 - `chain.csv`, a short view of the same steps: cycle, phase, model, served model, text, and score.
 
 [`Recorder`](https://github.com/smusali/echoChain/blob/main/echochain/persistence.py) writes those files. [`test_fake_cycle_records_served_model`](https://github.com/smusali/echoChain/blob/main/tests/test_cli.py) reads them. The manifest's token and cost totals are the sum of the JSONL rows, including judge calls. Schemas for both documents are in `schemas/`.
@@ -133,13 +142,15 @@ cycle,phase,model,served_model,text,score
 echoChain/
 ├── echochain/           # Core package
 │   ├── cli.py           # Command line
+│   ├── design.py        # Schedules, conditions, and the seed corpus
 │   ├── engine.py        # Telephone game orchestration
 │   ├── client.py        # OpenRouter API communication
 │   ├── judge.py         # Judge scoring
 │   ├── prompts.py       # Jinja2 templates
-│   ├── config.py        # Models, stop score, cycle limit
+│   ├── config.py        # Models, score bounds, and the step limit
 │   └── persistence.py   # Manifest, CSV, and JSONL output
 ├── schemas/             # JSON Schemas for the manifest and JSONL rows
+├── seeds/v1.toml        # Versioned seed corpus
 ├── tests/               # Offline tests
 ├── runs/                # Directories created by a run
 ├── CHANGELOG.md         # Release notes
@@ -148,26 +159,25 @@ echoChain/
 
 ## Key features
 
-- **Model rotation.** Each cycle takes the next ID in [`ROTATING_MODELS`](https://github.com/smusali/echoChain/blob/main/echochain/config.py). [`echochain/engine.py`](https://github.com/smusali/echoChain/blob/main/echochain/engine.py) advances that list once per cycle. Cycle 1 uses the first ID. [`test_fake_cycle_records_served_model`](https://github.com/smusali/echoChain/blob/main/tests/test_cli.py) records that ID and the served model. The test stops after one cycle because the fake judge score is 1, which is at or below the stop score.
-- **Judge.** [`score`](https://github.com/smusali/echoChain/blob/main/echochain/judge.py) asks [`JUDGE_MODEL`](https://github.com/smusali/echoChain/blob/main/echochain/config.py) (`openai/gpt-4.1-mini`) for a JSON `score`. The same test stores the score the fake judge returns. The [prompt](https://github.com/smusali/echoChain/blob/main/echochain/prompts.py) asks for an integer from 1 to 10. The code does not check that range. See [Known issues](#known-issues).
+- **Model rotation.** [`echochain/design.py`](https://github.com/smusali/echoChain/blob/main/echochain/design.py) assigns a model to each step. `alternate` walks [`ROTATING_MODELS`](https://github.com/smusali/echoChain/blob/main/echochain/config.py) one step at a time. `swap` walks that list backwards. `factorial` puts every model on every phase. `latin` balances models across the two phases. `fixed:<model>` uses one model for the whole chain. Every row records the schedule name. [`test_fake_cycle_records_served_model`](https://github.com/smusali/echoChain/blob/main/tests/test_cli.py) records the first ID and the served model.
+- **Judge.** [`score`](https://github.com/smusali/echoChain/blob/main/echochain/judge.py) asks [`JUDGE_MODEL`](https://github.com/smusali/echoChain/blob/main/echochain/config.py) (`openai/gpt-4.1-mini`) for a JSON object with `rationale` and an integer `score` from 1 to 10. The request uses a strict JSON schema. A reply that is empty, not an integer, or outside that range is stored as no score. Too many of those failures end the run with `judge_error`.
 - **Run record.** [`Recorder.log`](https://github.com/smusali/echoChain/blob/main/echochain/persistence.py) appends the step to `chain.csv` and `chain.jsonl`. `chain.jsonl` is the full record. The same test reads both files and checks the manifest totals.
 - **Budget.** `--budget` stops the run after the call that reaches the cap. Tokens and cost come from the completion response.
+- **Conditions.** `alternate` is the telephone chain with the alternating schedule. `swap` reverses that schedule. `same-model` keeps the telephone prompts and uses the first rotating model for every step. `identity` asks that model to repeat the text verbatim at temperature 0. `paraphrase` paraphrases the previous text with that model and does not turn it into a question. `--condition all` runs `alternate`, `same-model`, `identity`, and `paraphrase`.
+- **Seeds.** [`seeds/v1.toml`](https://github.com/smusali/echoChain/blob/main/seeds/v1.toml) holds the statements, each with an id, a domain, and a split (`study` or `held-out`). `--seed` selects one id. `--split study` selects the study set. The manifest stores the seed id and the corpus file hash.
 
-## Known issues
+## Results
 
-Version 0.1.0 still measures degradation incorrectly in four ways. All four are tracked in [#16](https://github.com/smusali/echoChain/issues/16) until 0.2.0:
+[`results/pilot-2026-10/`](results/pilot-2026-10/) holds the manifests, the raw JSONL, the plot script, and a short reading of the finished runs. The planned pilot was 10 study seeds, the `alternate`, `swap`, and `same-model` arms, and three repeats (90 runs, 5,400 calls). The dry-run upper bound was $14.05. Five runs finished and spent $0.15 before OpenRouter returned HTTP 402, because the account could not reserve the configured 1,024 completion tokens. The chart is that fragment: three `alternate` repeats and two `swap` repeats of the Redis seed.
 
-- **[C1](https://github.com/smusali/echoChain/issues/16).** A judge parse failure is stored as `1` (`_FALLBACK_SCORE` in [`echochain/judge.py`](https://github.com/smusali/echoChain/blob/main/echochain/judge.py)) and enters the running mean in [`echochain/engine.py`](https://github.com/smusali/echoChain/blob/main/echochain/engine.py).
-- **[C3](https://github.com/smusali/echoChain/issues/16).** Every step, including a question, is scored against the seed with the answer prompt ([`echochain/engine.py`](https://github.com/smusali/echoChain/blob/main/echochain/engine.py), [`echochain/prompts.py`](https://github.com/smusali/echoChain/blob/main/echochain/prompts.py)).
-- **[D1](https://github.com/smusali/echoChain/issues/16).** Phase and model are both chosen from the cycle index, so those effects are not isolated ([`echochain/engine.py`](https://github.com/smusali/echoChain/blob/main/echochain/engine.py)).
-- **[D5](https://github.com/smusali/echoChain/issues/16).** The run stops on the running mean. A finished run prints that reason. A budget stop exits with code 3.
+![Mean fidelity for the finished Redis runs](results/pilot-2026-10/fidelity.svg)
 
 ## Related work
 
-Iterative distortion through language models has already been studied. echoChain is built to differ in three ways, and two of those differences are not in this version:
+Iterative distortion through language models has already been studied. echoChain is built to differ in three ways:
 
-1. **Technical claims.** A model can keep the topic and lose the mechanism. The seed examples and the judge prompt ask about technical meaning. This version still collapses that question into one score.
-2. **Model rotation as a variable.** Rotation is meant to be isolated from the question and answer phase. This version does not isolate it (D1 and D2 in [#16](https://github.com/smusali/echoChain/issues/16)).
+1. **Technical claims.** A model can keep the topic and lose the mechanism. The seed examples and the judge prompt ask about technical meaning. Answer steps and question steps now use different rubrics. Each rubric is still one 1 to 10 score.
+2. **Model rotation as a variable.** The schedule is named and stored on every row, and the control conditions separate a same-model chain, a verbatim round trip, and a direct paraphrase from the rotating telephone chain.
 3. **Claim-by-claim fidelity.** Fidelity is meant to be scored claim by claim, following FActScore, rather than as one 1-10 score (C7 in [#19](https://github.com/smusali/echoChain/issues/19)). This version still asks for one score.
 
 Cited work:

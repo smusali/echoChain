@@ -15,6 +15,9 @@
     "prompt_sha256",
     "rubric_version",
     "seed_sha256",
+    "seed_id",
+    "corpus_version",
+    "corpus_sha256",
     "condition",
     "schedule",
     "requested_models",
@@ -54,18 +57,45 @@
     "prompt_sha256": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["a2q", "q2a", "judge_system", "judge_user"],
+      "required": [
+        "a2q",
+        "q2a",
+        "judge_system",
+        "judge_user",
+        "answerability",
+        "identity",
+        "paraphrase"
+      ],
       "properties": {
         "a2q": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "q2a": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "judge_system": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-        "judge_user": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        "judge_user": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "answerability": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "identity": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "paraphrase": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
       }
     },
     "rubric_version": {"type": "string"},
     "seed_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "seed_id": {"type": ["string", "null"]},
+    "corpus_version": {"type": ["string", "null"]},
+    "corpus_sha256": {
+      "anyOf": [
+        {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        {"type": "null"}
+      ]
+    },
     "condition": {"type": "string"},
-    "schedule": {"type": "array", "items": {"type": "string"}},
+    "schedule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "models"],
+      "properties": {
+        "name": {"type": "string"},
+        "models": {"type": "array", "items": {"type": "string"}}
+      }
+    },
     "requested_models": {"type": "array", "items": {"type": "string"}},
     "served_models": {"type": "array", "items": {"type": "string"}},
     "providers": {"type": "array", "items": {"type": "string"}},
@@ -84,10 +114,11 @@
     "stop_rule": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["name", "threshold"],
+      "required": ["name", "threshold", "consecutive"],
       "properties": {
         "name": {"type": "string"},
-        "threshold": {"type": "number"}
+        "threshold": {"type": "number"},
+        "consecutive": {"type": "integer", "minimum": 0}
       }
     },
     "judge_panel": {
@@ -122,7 +153,15 @@
       }
     },
     "termination_reason": {
-      "enum": ["threshold", "max_cycles", "generation_error", "budget_exceeded", null]
+      "enum": [
+        "threshold",
+        "max_cycles",
+        "generation_error",
+        "judge_error",
+        "budget_exceeded",
+        "interrupted",
+        null
+      ]
     },
     "budget": {
       "anyOf": [

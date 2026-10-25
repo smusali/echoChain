@@ -1,0 +1,87 @@
+{
+  "status": "finished",
+  "run_id": "2d6d1702-82d2-431f-833e-4d94dbbf094a",
+  "slug": "redis_uses_single_threaded",
+  "version": "0.1.0",
+  "git_sha": "842d06818a2437fc17bbbf7782d00a1413ceef64",
+  "git_dirty": true,
+  "python": "3.14.3",
+  "os": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+  "lock_sha256": "3b256744e4902d3fe9715557044f142f6c4c0c17ea8343a4028548a700e30800",
+  "prompt_sha256": {
+    "a2q": "1280fcb2ab0dabc97e29fb8fb4dd70afcfc384274704e2b1114946bf902cf0a8",
+    "q2a": "3adf96761d8724a9341bb75ea1268a3bdff5082fbb705f0547c6c98cfedd12f5",
+    "judge_system": "319a3723d163de76f24fd6f85cdce46d0e5d9b46de3a846ffbd3db8c1c2dc3bf",
+    "judge_user": "a7b750b7982dda42849b9923e489b7a218e1953e44f9a77803dbcfcd7b1614e8",
+    "answerability": "31f093a32a009ac88dc66b364f7a9150079a992031fc2d5f84391cf15214845b",
+    "identity": "056b65ebdc8c0b1688e22dc869cba5d24636d8be21997fd0d837bf68263f78ba",
+    "paraphrase": "c0964cbb376cbf851caad65e1f96b9c7d221559ba53d4f27bc4a960c6e539358"
+  },
+  "rubric_version": "1",
+  "seed_sha256": "e229fc1d26f78d38209e0229d1229e6f7a1ef4b03119fb6cdefb4ccb26275675",
+  "seed_id": "redis-epoll",
+  "corpus_version": "v1",
+  "corpus_sha256": "a44daf19bf050aa5874ed866f1abc33b721dcdc6e1506dd0de29a9b3affa2a16",
+  "condition": "alternate",
+  "schedule": {
+    "name": "alternate",
+    "models": [
+      "google/gemini-3.8-flash",
+      "deepseek/deepseek-v4.1-flash-1017",
+      "mistralai/mistral-small-2603"
+    ]
+  },
+  "requested_models": [
+    "google/gemini-3.8-flash",
+    "deepseek/deepseek-v4.1-flash-1017",
+    "mistralai/mistral-small-2603",
+    "openai/gpt-4.1-mini"
+  ],
+  "served_models": [
+    "google/gemini-3.8-flash",
+    "openai/gpt-4.1-mini",
+    "deepseek/deepseek-v4.1-flash-1017",
+    "mistralai/mistral-small-2603"
+  ],
+  "providers": [
+    "Google",
+    "OpenAI",
+    "Decart",
+    "Mistral",
+    "Ionstream",
+    "Wafer",
+    "DigitalOcean",
+    "Morph",
+    "Relace"
+  ],
+  "temperatures": {
+    "transform": 0.3,
+    "judge": 0.0
+  },
+  "sampling_seed": null,
+  "max_cycles": 30,
+  "max_tokens": 1024,
+  "stop_rule": {
+    "name": "fixed_length",
+    "threshold": 2.0,
+    "consecutive": 0
+  },
+  "judge_panel": [
+    {
+      "model": "openai/gpt-4.1-mini",
+      "samples": 1
+    }
+  ],
+  "started_at": "2026-10-25T05:05:17.821917Z",
+  "ended_at": "2026-10-25T05:07:08.491876Z",
+  "prompt_tokens": 11730,
+  "completion_tokens": 9661,
+  "cost": 0.029042038499999995,
+  "errors": {
+    "generation": 0,
+    "judge": 0
+  },
+  "termination_reason": "max_cycles",
+  "budget": null,
+  "deadline_seconds": 60.0
+}

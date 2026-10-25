@@ -15,11 +15,21 @@ Next release is `0.2.0`, tracked in [Upgrade to v0.2.0](https://github.com/smusa
 
 - Each run writes `manifest.json` and a complete JSONL row under `runs/<UTC>_<run id>/`.
 - `--out` chooses the run root, and `--budget` stops a run with exit code 3.
+- Named schedules (`alternate`, `swap`, `factorial`, `latin`, and `fixed:<model>`) and the control conditions `same-model`, `identity`, and `paraphrase`.
+- `seeds/v1.toml`, a versioned corpus. Runs can select a seed by id or a split.
+- `--condition`, `--repeats`, and `--dry-run`. `--dry-run` prints the call count and, when a key is set, a cost upper bound.
+- `results/pilot-2026-10/` records the runs that finished before the OpenRouter account could no longer reserve a call. The directory includes the manifests, the JSONL, the plot, and a paragraph on those limits.
 
 ### Changed
 
 - Chat calls share one client, retry only transient failures, and stop at a wall-clock deadline.
 - Completions record tokens, cost, and finish reason. Empty or truncated replies are tried once more.
+- Answer steps are scored for fidelity. Question steps are scored for answerability. Stop rules and plots read fidelity only.
+- A run keeps its planned length. The manifest records why it ended.
+
+### Fixed
+
+- A judge parse failure is stored as no score. It no longer enters the metric, and one bad reply no longer ends the run.
 
 ### Removed
 
