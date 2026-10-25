@@ -70,7 +70,11 @@ only-include = [
   "LICENSE",
   "CHANGELOG.md",
   "schemas",
+  "seeds",
 ]
+
+[tool.hatch.build.targets.wheel.force-include]
+"seeds/v1.toml" = "echochain/seeds/v1.toml"
 
 [tool.ruff]
 line-length = 88
@@ -88,6 +92,7 @@ convention = "google"
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["D"]
 "tools/**" = ["D"]
+"results/**" = ["D100"]
 "echochain/**" = ["D100", "D101", "D104", "D105"]
 "echochain/prompts.py" = ["E501"]
 

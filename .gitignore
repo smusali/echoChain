@@ -35,6 +35,5 @@ venv/
 .envrc
 
 # Experiments
-*.csv
-*.jsonl
+experiments/
 runs/

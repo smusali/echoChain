@@ -11,7 +11,7 @@ from types import TracebackType
 from typing import Literal, Protocol, TypedDict
 
 import httpx2
-from openai import APIConnectionError, APIStatusError, OpenAI
+from openai import APIConnectionError, APIStatusError, Omit, OpenAI, omit
 from openai.types.chat import (
     ChatCompletionMessageParam,
     ChatCompletionSystemMessageParam,
@@ -19,6 +19,9 @@ from openai.types.chat import (
 )
 from openai.types.chat.chat_completion import ChatCompletion
 from openai.types.completion_usage import CompletionUsage
+from openai.types.shared_params.response_format_json_schema import (
+    ResponseFormatJSONSchema,
+)
 
 from echochain.config import (
     CALL_DEADLINE_SECONDS,
@@ -36,6 +39,12 @@ _MAX_ATTEMPTS = 3
 _RETRY_BASE_SECONDS = 0.5
 _RETRY_CAP_SECONDS = 8.0
 _RETRY_STATUSES = frozenset({408, 409, 429})
+_RATE_LIMIT_STATUS = 429
+_CREDIT_STATUS = 402
+_RATE_LIMIT_WAITS = 5
+_CREDIT_WAITS = 2
+_RATE_LIMIT_WAIT_SECONDS = 20.0
+_MAX_STATUS_WAIT_SECONDS = 180.0
 _SERVER_STATUS = 500
 _MILLISECONDS = 1000.0
 _REJECTED_REASONS = frozenset({"length", "content_filter"})
@@ -87,6 +96,16 @@ class CallDeadlineError(Exception):
 class ModelRecord:
     model_id: str
     parameters: frozenset[str]
+    prompt_price: float | None = None
+    completion_price: float | None = None
+
+
+class _RequireParameters(TypedDict):
+    require_parameters: bool
+
+
+class _ProviderExtra(TypedDict):
+    provider: _RequireParameters
 
 
 class ModelCatalogError(RuntimeError):
@@ -103,6 +122,8 @@ class ChatClient(Protocol):
         model: str,
         messages: Sequence[ChatMessage],
         temperature: float,
+        *,
+        response_format: ResponseFormatJSONSchema | None = None,
     ) -> Completion:
         """Request a completion.
 
@@ -110,6 +131,8 @@ class ChatClient(Protocol):
             model: Model ID to call.
             messages: Chat messages.
             temperature: Sampling temperature.
+            response_format: Structured output schema. When set, the provider
+                must support it.
 
         Returns:
             The completion, including usage and the model that served it.
@@ -226,6 +249,8 @@ class OpenRouterClient:
         model: str,
         messages: Sequence[ChatMessage],
         temperature: float,
+        *,
+        response_format: ResponseFormatJSONSchema | None = None,
     ) -> Completion:
         """Request a completion.
 
@@ -233,6 +258,8 @@ class OpenRouterClient:
             model: Model ID to call.
             messages: Chat messages.
             temperature: Sampling temperature.
+            response_format: Structured output schema. When set, the provider
+                must support it.
 
         Returns:
             The completion. A rejected reply is tried once more.
@@ -241,10 +268,30 @@ class OpenRouterClient:
             GenerationError: The reply was empty, truncated, or blocked twice.
             CallDeadlineError: The call exceeded its wall-clock deadline.
         """
-        first, usable = self._once(model, messages, temperature)
+        waits = 0
+        while True:
+            try:
+                return self._exchange(model, messages, temperature, response_format)
+            except APIStatusError as exc:
+                limit = _wait_limit(exc.status_code)
+                if limit is None or waits >= limit:
+                    raise
+                waits += 1
+                time.sleep(_pause_seconds(exc))
+
+    def _exchange(
+        self,
+        model: str,
+        messages: Sequence[ChatMessage],
+        temperature: float,
+        response_format: ResponseFormatJSONSchema | None,
+    ) -> Completion:
+        first, usable = self._once(model, messages, temperature, response_format)
         if usable:
             return first
-        second, second_usable = self._once(model, messages, temperature)
+        second, second_usable = self._once(
+            model, messages, temperature, response_format
+        )
         if second_usable:
             return merge_attempts((first, second))
         raise GenerationError((first, second))
@@ -254,6 +301,7 @@ class OpenRouterClient:
         model: str,
         messages: Sequence[ChatMessage],
         temperature: float,
+        response_format: ResponseFormatJSONSchema | None,
     ) -> tuple[Completion, bool]:
         gate = self._deadline_transport
         client = self._sdk
@@ -262,7 +310,11 @@ class OpenRouterClient:
         deadline = time.monotonic() + self._deadline_seconds
         gate.deadline = deadline
         started = time.perf_counter()
-        response = _send(client, deadline, model, messages, temperature)
+        response = _send(
+            client,
+            deadline,
+            _Outbound(model, messages, temperature, response_format),
+        )
         latency = time.perf_counter() - started
         completion = _completion(response, model, temperature, latency)
         return completion, _usable(completion, _refused(response))
@@ -359,7 +411,12 @@ def parse_catalog(payload: Mapping[str, object]) -> dict[str, ModelRecord]:
         if not isinstance(model_id, str) or model_id == "":
             raise ModelCatalogError("model catalog entry is missing id")
         parameters = _parameter_names(fields.get("supported_parameters"), model_id)
-        records[model_id] = ModelRecord(model_id=model_id, parameters=parameters)
+        records[model_id] = ModelRecord(
+            model_id=model_id,
+            parameters=parameters,
+            prompt_price=_price(fields.get("pricing"), "prompt"),
+            completion_price=_price(fields.get("pricing"), "completion"),
+        )
     return records
 
 
@@ -393,24 +450,48 @@ def fetch_catalog(api_key: str) -> dict[str, ModelRecord]:
     return parse_catalog(payload)
 
 
-def _send(
-    client: OpenAI,
-    deadline: float,
-    model: str,
-    messages: Sequence[ChatMessage],
-    temperature: float,
-) -> ChatCompletion:
+@dataclass(frozen=True)
+class _Outbound:
+    model: str
+    messages: Sequence[ChatMessage]
+    temperature: float
+    response_format: ResponseFormatJSONSchema | None
+
+
+def _wait_limit(status: int) -> int | None:
+    if status == _RATE_LIMIT_STATUS:
+        return _RATE_LIMIT_WAITS
+    if status == _CREDIT_STATUS:
+        return _CREDIT_WAITS
+    return None
+
+
+def _pause_seconds(exc: APIStatusError) -> float:
+    parsed = _retry_after_seconds(exc.response.headers)
+    if parsed is None:
+        return _RATE_LIMIT_WAIT_SECONDS
+    return min(parsed, _MAX_STATUS_WAIT_SECONDS)
+
+
+def _send(client: OpenAI, deadline: float, call: _Outbound) -> ChatCompletion:
+    schema: ResponseFormatJSONSchema | Omit = omit
+    extra: _ProviderExtra | None = None
+    if call.response_format is not None:
+        schema = call.response_format
+        extra = {"provider": {"require_parameters": True}}
     for attempt in range(_MAX_ATTEMPTS):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise CallDeadlineError("call deadline exceeded")
         try:
             return client.chat.completions.create(
-                model=model,
-                messages=_to_openai(messages),
-                temperature=temperature,
+                model=call.model,
+                messages=_to_openai(call.messages),
+                temperature=call.temperature,
                 max_tokens=MAX_TOKENS,
                 timeout=_timeout(remaining),
+                response_format=schema,
+                extra_body=extra,
             )
         except CallDeadlineError:
             raise
@@ -582,6 +663,24 @@ def _mapping(value: object, label: str) -> dict[str, object]:
             raise ModelCatalogError(f"{label} has a non-string key")
         mapped[key] = item
     return mapped
+
+
+def _price(value: object, side: str) -> float | None:
+    if not isinstance(value, dict):
+        return None
+    raw = value.get(side)
+    if isinstance(raw, str):
+        return _parse_price(raw)
+    if isinstance(raw, bool) or not isinstance(raw, int | float):
+        return None
+    return raw
+
+
+def _parse_price(raw: str) -> float | None:
+    try:
+        return float(raw)
+    except ValueError:
+        return None
 
 
 def _parameter_names(value: object, model_id: str) -> frozenset[str]:

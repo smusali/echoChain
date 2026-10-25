@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import itertools
 from dataclasses import dataclass
 
 from echochain.client import (
@@ -10,12 +9,14 @@ from echochain.client import (
     GenerationError,
     merge_attempts,
 )
-from echochain.config import (
-    JUDGE_SAMPLES,
-    MAX_CYCLES,
-    ROTATING_MODELS,
-    STOP_SCORE,
-    TRANSFORM_TEMPERATURE,
+from echochain.config import JUDGE_ERROR_DENOMINATOR, JUDGE_ERROR_NUMERATOR
+from echochain.design import (
+    RunSpec,
+    default_spec,
+    model_for,
+    phase_for,
+    render_transform,
+    score_kind,
 )
 from echochain.judge import Judgement, JudgeSample, score
 from echochain.persistence import (
@@ -23,14 +24,10 @@ from echochain.persistence import (
     JudgeSampleRecord,
     Recorder,
     StepRecord,
+    TerminationReason,
     sha256_text,
     utc_now,
 )
-from echochain.prompts import A_TO_Q, Q_TO_A
-
-_INITIAL_AVERAGE = 10.0
-_ANSWER_TO_QUESTION = "a2q"
-_QUESTION_TO_ANSWER = "q2a"
 
 
 @dataclass
@@ -47,10 +44,23 @@ class _Spending:
 
 
 @dataclass(frozen=True)
+class _Text:
+    run_id: str
+    index: int
+    phase: str
+    kind: str
+    prompt: str
+    source: str
+
+
+@dataclass(frozen=True)
 class _Step:
     run_id: str
     step: int
     phase: str
+    condition: str
+    schedule: str
+    score_kind: str
     prompt: str
     source: str
     reply: Completion
@@ -62,62 +72,52 @@ def cycle(
     client: ChatClient,
     *,
     run_id: str,
-    budget: float | None,
-) -> str:
-    """Run telephone cycles until a stop rule, a generation failure, or the budget.
+    spec: RunSpec | None = None,
+) -> TerminationReason:
+    """Run one chain until a stop rule, a failure, or the budget.
 
     Args:
         seed: Original answer.
         recorder: Sink for each step.
         client: Chat client used for transformations and judging.
         run_id: Run UUID stored on every row.
-        budget: USD cap. None means no cap.
+        spec: Condition, schedule, budget, and stop rule. Defaults to a
+            fixed-length alternating run.
 
     Returns:
-        Why the run stopped: threshold, max_cycles, generation_error, or
-        budget_exceeded.
+        Why the run stopped.
     """
-    spending = _Spending(budget)
+    plan = default_spec() if spec is None else spec
+    spending = _Spending(plan.budget)
+    reason: TerminationReason = "max_cycles"
     if spending.blocked():
         return "budget_exceeded"
     current = seed
-    original = seed
-    models = itertools.cycle(ROTATING_MODELS)
-    average = _INITIAL_AVERAGE
-    reason = "max_cycles"
-    for index in range(1, MAX_CYCLES + 1):
-        phase = _ANSWER_TO_QUESTION if index % 2 else _QUESTION_TO_ANSWER
-        model = next(models)
-        prompt = (
-            A_TO_Q.render(answer=current)
-            if phase == _ANSWER_TO_QUESTION
-            else Q_TO_A.render(question=current)
-        )
+    failures = 0
+    streak = 0
+    for index in range(1, plan.max_cycles + 1):
+        phase = phase_for(plan.condition.prompts, index)
+        model = model_for(plan.condition.schedule, plan.models, index)
+        prompt = render_transform(phase, current)
+        kind = score_kind(phase)
+        text = _Text(run_id, index, phase, kind, prompt, current)
         messages: list[ChatMessage] = [{"role": "user", "content": prompt}]
         try:
-            reply = client.chat(model, messages, temperature=TRANSFORM_TEMPERATURE)
+            reply = client.chat(model, messages, temperature=plan.condition.temperature)
         except GenerationError as exc:
-            failed = merge_attempts(exc.attempts)
-            spending.add(failed.usage.cost)
+            reply = merge_attempts(exc.attempts)
+            spending.add(reply.usage.cost)
             recorder.generation_errors += 1
-            _log(
-                recorder, _Step(run_id, index, phase, prompt, current, failed), None, ()
-            )
+            _log(recorder, _described(plan, text, reply), None, ())
             reason = "generation_error"
             break
-        step = _Step(run_id, index, phase, prompt, current, reply)
+        step = _described(plan, text, reply)
         if spending.add(reply.usage.cost):
             _log(recorder, step, None, ())
             reason = "budget_exceeded"
             break
         try:
-            judgement = score(
-                original,
-                reply.text,
-                client,
-                spending.add,
-                n=JUDGE_SAMPLES,
-            )
+            judgement = score(seed, reply.text, client, spending.add, kind=kind)
         except GenerationError as exc:
             spending.add(merge_attempts(exc.attempts).usage.cost)
             recorder.generation_errors += 1
@@ -126,15 +126,53 @@ def cycle(
             break
         recorder.judge_errors += judgement.errors
         _log(recorder, step, judgement, ())
+        failures, streak, stop = _stop(failures, streak, kind, judgement.mean, plan)
         current = reply.text
         if spending.blocked():
             reason = "budget_exceeded"
             break
-        average = ((average * (index - 1)) + judgement.mean) / index
-        if average <= STOP_SCORE:
-            reason = "threshold"
+        if stop is not None:
+            reason = stop
             break
     return reason
+
+
+def _stop(
+    failures: int,
+    streak: int,
+    kind: str,
+    mean: float | None,
+    plan: RunSpec,
+) -> tuple[int, int, TerminationReason | None]:
+    if mean is None:
+        failures += 1
+    elif kind == "fidelity":
+        streak = _fidelity_streak(streak, mean, plan.stop_score)
+    if failures * JUDGE_ERROR_DENOMINATOR > plan.max_cycles * JUDGE_ERROR_NUMERATOR:
+        return failures, streak, "judge_error"
+    if plan.stop_consecutive > 0 and streak >= plan.stop_consecutive:
+        return failures, streak, "threshold"
+    return failures, streak, None
+
+
+def _fidelity_streak(streak: int, mean: float, stop_score: float) -> int:
+    if mean <= stop_score:
+        return streak + 1
+    return 0
+
+
+def _described(plan: RunSpec, text: _Text, reply: Completion) -> _Step:
+    return _Step(
+        run_id=text.run_id,
+        step=text.index,
+        phase=text.phase,
+        condition=plan.condition.name,
+        schedule=plan.condition.schedule,
+        score_kind=text.kind,
+        prompt=text.prompt,
+        source=text.source,
+        reply=reply,
+    )
 
 
 def _log(
@@ -143,6 +181,7 @@ def _log(
     judgement: Judgement | None,
     failed_judge: tuple[Completion, ...],
 ) -> None:
+    mean = None if judgement is None else judgement.mean
     if judgement is not None:
         samples = [_sample_record(sample) for sample in judgement.samples]
         errors = judgement.errors
@@ -157,12 +196,15 @@ def _log(
     else:
         samples = []
         errors = 0
-    judge = _judge_record(samples, errors)
+    judge = _judge_record(samples, errors, step.score_kind, mean)
     reply = step.reply
     row: StepRecord = {
         "run_id": step.run_id,
         "step": step.step,
         "phase": step.phase,
+        "condition": step.condition,
+        "schedule": step.schedule,
+        "score_kind": step.score_kind,
         "requested_model": reply.requested_model,
         "served_model": reply.served_model,
         "provider": reply.provider,
@@ -186,13 +228,18 @@ def _log(
     recorder.log(row)
 
 
-def _judge_record(samples: list[JudgeSampleRecord], errors: int) -> JudgeRecord:
+def _judge_record(
+    samples: list[JudgeSampleRecord],
+    errors: int,
+    kind: str,
+    mean: float | None,
+) -> JudgeRecord:
     return {
         "samples": samples,
         "errors": errors,
-        "fidelity_vs_seed": None,
+        "fidelity_vs_seed": mean if kind == "fidelity" else None,
         "fidelity_vs_prev": None,
-        "answerability": None,
+        "answerability": mean if kind == "answerability" else None,
     }
 
 

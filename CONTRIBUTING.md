@@ -82,13 +82,15 @@ Before a paid call, `check_models` in [`echochain/client.py`](echochain/client.p
 
 ## Add a condition
 
-A condition or a rotation schedule is not configurable. The loop in [`echochain/engine.py`](echochain/engine.py) alternates phase and model from the same cycle index. Schedules and control arms are D1 and D2 in [#16](https://github.com/smusali/echoChain/issues/16). Named experiment config is F1 in [#39](https://github.com/smusali/echoChain/issues/39).
+Edit the table in [`echochain/design.py`](echochain/design.py). A condition names a schedule (`alternate`, `swap`, `factorial`, `latin`, or `fixed:<model>`), the prompts (`telephone`, `identity`, or `paraphrase`), and the transform temperature.
+
+`--condition all` runs `alternate`, `same-model`, `identity`, and `paraphrase`.
 
 ## Paid smoke test
 
 This step calls OpenRouter and spends money. Nothing else in this document does.
 
-Pass `--budget` with a USD amount to stop once spend reaches that cap. The process exits with code 3 and records `budget_exceeded`. A run with no budget still stops when the running mean of scores is at or below 2, or after 30 cycles, whichever comes first. Plan for up to 30 cycles.
+Pass `--budget` with a USD amount to stop once spend reaches that cap. The process exits with code 3 and records `budget_exceeded`. A run with no budget completes the planned 30 steps. It can also stop for a generation failure, too many unscored judge replies, or an interrupt. The process prints the termination reason. Plan for up to 30 steps, each with one transform call and one judge call.
 
 ```bash
 export OPENROUTER_API_KEY="your-api-key-here"

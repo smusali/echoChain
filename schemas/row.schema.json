@@ -6,6 +6,9 @@
     "run_id",
     "step",
     "phase",
+    "condition",
+    "schedule",
+    "score_kind",
     "requested_model",
     "served_model",
     "provider",
@@ -25,7 +28,10 @@
   "properties": {
     "run_id": {"type": "string", "format": "uuid"},
     "step": {"type": "integer", "minimum": 1},
-    "phase": {"enum": ["a2q", "q2a"]},
+    "phase": {"enum": ["a2q", "q2a", "identity", "paraphrase"]},
+    "condition": {"type": "string"},
+    "schedule": {"type": "string"},
+    "score_kind": {"enum": ["fidelity", "answerability"]},
     "requested_model": {"type": "string"},
     "served_model": {"type": "string"},
     "provider": {"type": ["string", "null"]},
@@ -77,7 +83,7 @@
               "finish_reason"
             ],
             "properties": {
-              "score": {"type": ["number", "null"]},
+              "score": {"type": ["integer", "null"]},
               "error": {"type": ["string", "null"]},
               "prompt_tokens": {"type": "integer", "minimum": 0},
               "completion_tokens": {"type": "integer", "minimum": 0},
@@ -91,9 +97,9 @@
           }
         },
         "errors": {"type": "integer", "minimum": 0},
-        "fidelity_vs_seed": {"type": "null"},
+        "fidelity_vs_seed": {"type": ["number", "null"]},
         "fidelity_vs_prev": {"type": "null"},
-        "answerability": {"type": "null"}
+        "answerability": {"type": ["number", "null"]}
       }
     },
     "timestamp": {"type": "string", "format": "date-time"}
