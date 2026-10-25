@@ -1,158 +1,119 @@
 # Contributing to echoChain
 
-Thank you for your interest in contributing to echoChain! This guide will help you get started.
+Checks in this document do not need an OpenRouter API key. The only step that spends money is [Paid smoke test](#paid-smoke-test).
 
-## 🚀 Quick Start
+## Prerequisites
 
-### Prerequisites
 - Python 3.11+
-- OpenRouter API key
+- Git
 
-### Setup Development Environment
+## Setup
 
-1. **Clone the repository**
+1. Clone the repository.
+
    ```bash
    git clone https://github.com/smusali/echoChain.git
    cd echoChain
    ```
 
-2. **Install dependencies**
+2. Install the package and the development tools.
+
+   CI installs from the lock file:
+
    ```bash
    uv sync --frozen --extra dev
    ```
-   CI installs from that lock file. With pip, create a virtual environment first:
+
+   With pip, create a virtual environment first:
+
    ```bash
    python -m venv .venv
    source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-   pip install -e ".[dev]"
+   pip install -e '.[dev]'
    ```
 
-3. **Configure API key**
-   ```bash
-   cp .env.example .env
-   ```
-   Put `OPENROUTER_API_KEY` in `.env`, or export it. A live run needs the key. Tests do not.
+3. Install the git hooks.
 
-4. **Install the git hooks**
    ```bash
    uv run pre-commit install
    ```
 
-## 📋 Project Structure
+   If you installed with pip and the virtual environment is active:
 
-```
-echoChain/
-├── echochain/            # Core package
-│   ├── cli.py            # Command line
-│   ├── engine.py         # Telephone game orchestration
-│   ├── client.py         # API communication
-│   ├── judge.py          # LLM-as-a-Judge scoring
-│   ├── prompts.py        # Template management
-│   ├── config.py         # System configuration
-│   └── persistence.py    # Data storage
-├── tests/                # Offline tests
-├── experiments/          # Generated experiment data
-└── pyproject.toml        # Package metadata
-```
+   ```bash
+   pre-commit install
+   ```
 
-## 🧪 Running Tests
+## Tests
 
-The default suite is offline. It does not need an API key, and it fails if a test opens a network connection.
+The default suite is offline. It does not read `OPENROUTER_API_KEY`. It fails if a test opens a network socket.
 
 ```bash
 uv run pytest
 uv run pre-commit run --all-files
 ```
 
-## 🎯 How to Contribute
+With pip, after activating the virtual environment:
 
-### Reporting Issues
-- Use clear, descriptive titles
-- Include Python version and OS
-- Provide steps to reproduce
-- Share error messages and logs
-
-### Submitting Changes
-
-1. **Fork the repository**
-2. **Create a feature branch**
-   ```bash
-   git checkout -b feature/your-feature-name
-   ```
-
-3. **Make your changes**
-   - Follow existing code style
-   - Add docstrings for new functions
-   - Update relevant documentation
-
-4. **Test your changes**
-   ```bash
-   uv run pytest
-   uv run pre-commit run --all-files
-   ```
-
-5. **Commit and push**
-   ```bash
-   git commit -m "Add: brief description of changes"
-   git push origin feature/your-feature-name
-   ```
-
-6. **Open a Pull Request**
-   - Describe what your changes do
-   - Reference any related issues
-   - Include testing steps
-
-## 📝 Code Style Guidelines
-
-- **Python**: Ruff enforces the selected lint rules and formats to 88 characters
-- **Types**: mypy runs in strict mode on the package and tests
-- **Hooks**: `pre-commit run --all-files` runs Ruff and mypy
-- **Functions**: Use type hints and docstrings for public functions
-- **Line length**: 88 characters maximum
-
-### Example Function
-```python
-def process_response(text: str, model: str) -> dict[str, str]:
-    """Process LLM response and extract relevant information.
-
-    Args:
-        text: Raw response text from LLM
-        model: Model identifier used for the response
-
-    Returns:
-        Processed response data with metadata
-    """
-    # Implementation here
-    return {"text": text.strip(), "model": model}
+```bash
+pytest
+pre-commit run --all-files
 ```
 
-## 🐛 Common Issues
+`pre-commit run --all-files` runs Ruff and mypy. Ruff formats to 88 characters. mypy runs in strict mode on `echochain` and `tests`.
 
-**API Hanging**: Some OpenRouter models may hang on certain inputs. This is a known limitation.
+## Commit messages
 
-**Missing Dependencies**: Run `uv sync --frozen --extra dev` or `pip install -e ".[dev]"`.
+The history uses these types:
 
-**Permission Errors**: Ensure write permissions for the `experiments/` directory.
+- `feat:` for a new capability
+- `fix:` for a bug fix
+- `docs:` for documentation
 
-## 💡 Contribution Ideas
+A scope is optional: `fix(package): make a fresh install work offline`.
 
-- Improve timeout handling for API calls
-- Add support for additional LLM providers
-- Create experiment analysis tools
-- Implement better error recovery
-- Add visualization capabilities
-- Improve documentation
+## Add a model
 
-## 📞 Getting Help
+Edit `ROTATING_MODELS` in [`echochain/config.py`](echochain/config.py).
 
-- Open an issue for bugs or questions
-- Check existing issues before creating new ones
-- Be patient and respectful in communications
+Before a paid call, `check_models` in [`echochain/client.py`](echochain/client.py) requires every configured ID, including the judge, to be in the OpenRouter catalog and to advertise `response_format` and `seed`. Leave `JUDGE_MODEL` out of `ROTATING_MODELS`.
 
-## 📄 License
+[`tests/test_cli.py`](tests/test_cli.py) builds its catalog fixture from `configured_models()`, so the offline preflight tests follow the list.
+
+## Add a condition
+
+A condition or a rotation schedule is not configurable. The loop in [`echochain/engine.py`](echochain/engine.py) alternates phase and model from the same cycle index. Schedules and control arms are D1 and D2 in [#16](https://github.com/smusali/echoChain/issues/16). Named experiment config is F1 in [#39](https://github.com/smusali/echoChain/issues/39).
+
+## Paid smoke test
+
+This step calls OpenRouter and spends money. Nothing else in this document does.
+
+There is no `--budget` flag yet (E7 in [#13](https://github.com/smusali/echoChain/issues/13)). A run stops when the running mean of scores is at or below 2, or after 30 cycles, whichever comes first. Plan for up to 30 cycles.
+
+```bash
+export OPENROUTER_API_KEY="your-api-key-here"
+echochain --start "Redis uses single-threaded event loops with epoll for I/O multiplexing"
+```
+
+You can also put the key in `.env`. Copy [`.env.example`](.env.example) and fill in `OPENROUTER_API_KEY`. The process never accepts the key as an argument.
+
+## Report an issue
+
+- Use a descriptive title.
+- Include the Python version and the operating system.
+- Give the steps, the command, and the error text. Leave the API key out.
+
+## Open a pull request
+
+1. Fork the repository and create a branch.
+2. Make the change. Add docstrings on new public functions.
+3. Run the [tests](#tests).
+4. Open a pull request that says what changed and how you tested it.
+
+## Ideas
+
+Open work is tracked in the [issue list](https://github.com/smusali/echoChain/issues).
+
+## License
 
 By contributing, you agree that your contributions will be licensed under the same license as the project.
-
----
-
-**Happy Contributing!** 🎉 
