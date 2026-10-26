@@ -25,20 +25,12 @@ from echochain.config import (
     ROTATING_MODELS,
     STOP_CONSECUTIVE,
     STOP_SCORE,
+    TOP_P,
     TRANSFORM_TEMPERATURE,
     configured_models,
     redact,
 )
-from echochain.prompts import (
-    A_TO_Q_SOURCE,
-    ANSWERABILITY_USER_SOURCE,
-    IDENTITY_SOURCE,
-    JUDGE_SYS,
-    JUDGE_USER_SOURCE,
-    PARAPHRASE_SOURCE,
-    Q_TO_A_SOURCE,
-    RUBRIC_VERSION,
-)
+from echochain.prompts import RUBRIC_VERSION, template_hashes
 
 _SLUG_WORDS = 3
 _DEFAULT_CONDITION = "alternate"
@@ -85,11 +77,20 @@ class RunDataError(RuntimeError):
 class ParametersRecord(TypedDict):
     temperature: float
     max_tokens: int
-    seed: None
+    top_p: float
+    seed: int | None
+    seed_honored: bool | None
+
+
+class ClaimVerdictRecord(TypedDict):
+    id: str
+    verdict: str
 
 
 class JudgeSampleRecord(TypedDict):
     score: int | None
+    anchored: int | None
+    verdicts: list[ClaimVerdictRecord]
     error: str | None
     prompt_tokens: int
     completion_tokens: int
@@ -99,14 +100,32 @@ class JudgeSampleRecord(TypedDict):
     served_model: str
     provider: str | None
     finish_reason: str
+    seed: int | None
+    top_p: float
+    seed_honored: bool | None
 
 
 class JudgeRecord(TypedDict):
     samples: list[JudgeSampleRecord]
+    prev_samples: list[JudgeSampleRecord]
     errors: int
     fidelity_vs_seed: float | None
-    fidelity_vs_prev: None
+    fidelity_spread: float | None
+    anchored: float | None
+    anchored_spread: float | None
+    fidelity_vs_prev: float | None
+    anchored_vs_prev: float | None
     answerability: float | None
+    answerability_anchored: float | None
+    claims: list[ClaimVerdictRecord]
+    claim_supported: int | None
+    claim_contradicted: int | None
+    claim_total: int | None
+    claim_fidelity: float | None
+    contradiction_rate: float | None
+    prev_claims: list[ClaimVerdictRecord]
+    prev_claim_fidelity: float | None
+    prev_contradiction_rate: float | None
 
 
 class StepRecord(TypedDict):
@@ -196,7 +215,8 @@ class Manifest(TypedDict):
     served_models: list[str]
     providers: list[ModelProvider]
     temperatures: Temperatures
-    sampling_seed: None
+    top_p: float
+    sampling_seed: int | None
     max_cycles: int
     max_tokens: int
     stop_rule: StopRule
@@ -232,6 +252,8 @@ class ManifestDesign:
     deadline_seconds: float | None = None
     rubric_version: str | None = None
     requested_models: tuple[str, ...] | None = None
+    sampling_seed: int | None = None
+    top_p: float | None = None
 
 
 @dataclass(frozen=True)
@@ -268,14 +290,15 @@ def prompt_hashes() -> PromptHashes:
     Returns:
         SHA-256 digests for the transform and judge prompts.
     """
+    hashes = template_hashes()
     return {
-        "a2q": sha256_text(A_TO_Q_SOURCE),
-        "q2a": sha256_text(Q_TO_A_SOURCE),
-        "judge_system": sha256_text(JUDGE_SYS),
-        "judge_user": sha256_text(JUDGE_USER_SOURCE),
-        "answerability": sha256_text(ANSWERABILITY_USER_SOURCE),
-        "identity": sha256_text(IDENTITY_SOURCE),
-        "paraphrase": sha256_text(PARAPHRASE_SOURCE),
+        "a2q": hashes["a2q"],
+        "q2a": hashes["q2a"],
+        "judge_system": hashes["judge_system"],
+        "judge_user": hashes["judge_user"],
+        "answerability": hashes["answerability"],
+        "identity": hashes["identity"],
+        "paraphrase": hashes["paraphrase"],
     }
 
 
@@ -356,7 +379,8 @@ def running_manifest(
             "transform": chosen.transform_temperature,
             "judge": judge_temperature,
         },
-        "sampling_seed": None,
+        "top_p": TOP_P if chosen.top_p is None else chosen.top_p,
+        "sampling_seed": chosen.sampling_seed,
         "max_cycles": max_cycles,
         "max_tokens": max_tokens,
         "stop_rule": {
@@ -598,7 +622,7 @@ class Recorder:
             (row["prompt_tokens"], row["completion_tokens"], row["cost"]),
             (row["served_model"], row["requested_model"], row["provider"]),
         )
-        for sample in row["judge"]["samples"]:
+        for sample in (*row["judge"]["samples"], *row["judge"]["prev_samples"]):
             self._track(
                 (
                     sample["prompt_tokens"],
@@ -651,13 +675,30 @@ def _slug(seed: str) -> str:
 
 
 def _redact_row(record: StepRecord) -> StepRecord:
-    samples = [_redact_sample(sample) for sample in record["judge"]["samples"]]
+    judge_row = record["judge"]
     judge: JudgeRecord = {
-        "samples": samples,
-        "errors": record["judge"]["errors"],
-        "fidelity_vs_seed": record["judge"]["fidelity_vs_seed"],
-        "fidelity_vs_prev": None,
-        "answerability": record["judge"]["answerability"],
+        "samples": [_redact_sample(sample) for sample in judge_row["samples"]],
+        "prev_samples": [
+            _redact_sample(sample) for sample in judge_row["prev_samples"]
+        ],
+        "errors": judge_row["errors"],
+        "fidelity_vs_seed": judge_row["fidelity_vs_seed"],
+        "fidelity_spread": judge_row["fidelity_spread"],
+        "anchored": judge_row["anchored"],
+        "anchored_spread": judge_row["anchored_spread"],
+        "fidelity_vs_prev": judge_row["fidelity_vs_prev"],
+        "anchored_vs_prev": judge_row["anchored_vs_prev"],
+        "answerability": judge_row["answerability"],
+        "answerability_anchored": judge_row["answerability_anchored"],
+        "claims": list(judge_row["claims"]),
+        "claim_supported": judge_row["claim_supported"],
+        "claim_contradicted": judge_row["claim_contradicted"],
+        "claim_total": judge_row["claim_total"],
+        "claim_fidelity": judge_row["claim_fidelity"],
+        "contradiction_rate": judge_row["contradiction_rate"],
+        "prev_claims": list(judge_row["prev_claims"]),
+        "prev_claim_fidelity": judge_row["prev_claim_fidelity"],
+        "prev_contradiction_rate": judge_row["prev_contradiction_rate"],
     }
     return {
         "run_id": record["run_id"],
@@ -687,6 +728,8 @@ def _redact_row(record: StepRecord) -> StepRecord:
 def _redact_sample(sample: JudgeSampleRecord) -> JudgeSampleRecord:
     return {
         "score": sample["score"],
+        "anchored": sample["anchored"],
+        "verdicts": list(sample["verdicts"]),
         "error": _redact_optional(sample["error"]),
         "prompt_tokens": sample["prompt_tokens"],
         "completion_tokens": sample["completion_tokens"],
@@ -696,6 +739,9 @@ def _redact_sample(sample: JudgeSampleRecord) -> JudgeSampleRecord:
         "served_model": redact(sample["served_model"]),
         "provider": _redact_optional(sample["provider"]),
         "finish_reason": redact(sample["finish_reason"]),
+        "seed": sample["seed"],
+        "top_p": sample["top_p"],
+        "seed_honored": sample["seed_honored"],
     }
 
 
@@ -765,10 +811,13 @@ def _text(row: Mapping[str, object], key: str, message: str) -> str:
 def _sample_maps(judge: object) -> list[Mapping[str, object]]:
     if not isinstance(judge, dict):
         return []
-    samples = judge.get("samples")
-    if not isinstance(samples, list):
-        return []
-    return [sample for sample in samples if isinstance(sample, dict)]
+    found: list[Mapping[str, object]] = []
+    for key in ("samples", "prev_samples"):
+        samples = judge.get(key)
+        if not isinstance(samples, list):
+            continue
+        found.extend(sample for sample in samples if isinstance(sample, dict))
+    return found
 
 
 def _spent(rows: Sequence[Mapping[str, object]]) -> float:
@@ -819,8 +868,6 @@ def _load_manifest(path: Path) -> Manifest:
 
 
 def _manifest(raw: Mapping[str, object]) -> Manifest:
-    if raw.get("sampling_seed") is not None:
-        raise RunDataError("sampling_seed must be null")
     schedule = _mapping(raw.get("schedule"), "schedule")
     temperatures = _mapping(raw.get("temperatures"), "temperatures")
     stop = _mapping(raw.get("stop_rule"), "stop_rule")
@@ -855,7 +902,8 @@ def _manifest(raw: Mapping[str, object]) -> Manifest:
             "transform": _amount(temperatures.get("transform")),
             "judge": _amount(temperatures.get("judge")),
         },
-        "sampling_seed": None,
+        "top_p": _amount(raw.get("top_p")),
+        "sampling_seed": _optional_seed(raw.get("sampling_seed")),
         "max_cycles": _count(raw.get("max_cycles")),
         "max_tokens": _count(raw.get("max_tokens")),
         "stop_rule": {
@@ -979,6 +1027,14 @@ def _optional_bool(value: object, label: str) -> bool | None:
         return None
     if not isinstance(value, bool):
         raise RunDataError(f"{label} must be a boolean")
+    return value
+
+
+def _optional_seed(value: object) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise RunDataError("sampling_seed must be a positive integer")
     return value
 
 

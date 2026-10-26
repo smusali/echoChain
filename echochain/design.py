@@ -8,8 +8,6 @@ from importlib.resources import files
 from pathlib import Path
 from typing import Literal
 
-from jinja2 import Template
-
 from echochain.config import (
     JUDGE_ERROR_DENOMINATOR,
     JUDGE_ERROR_NUMERATOR,
@@ -24,8 +22,14 @@ from echochain.config import (
     STOP_SCORE,
     TRANSFORM_TEMPERATURE,
 )
-from echochain.judge import ScoreKind
-from echochain.prompts import A_TO_Q, IDENTITY_TMPL, PARAPHRASE_TMPL, Q_TO_A
+from echochain.judge import Claim, ScoreKind
+from echochain.prompts import (
+    A_TO_Q,
+    IDENTITY_TMPL,
+    PARAPHRASE_TMPL,
+    Q_TO_A,
+    render_text,
+)
 
 PromptKind = Literal["telephone", "identity", "paraphrase"]
 FIXED_LENGTH = "fixed_length"
@@ -54,6 +58,7 @@ class Seed:
     domain: str
     text: str
     split: str
+    claims: tuple[Claim, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -104,6 +109,10 @@ class RunSpec:
     start_step: int = 1
     opening_text: str | None = None
     spent: float = 0.0
+    claims: tuple[Claim, ...] = ()
+    sampling_seed: int | None = None
+    top_p: float = 1.0
+    previous_answer: str | None = None
 
 
 def stop_rule_name(consecutive: int) -> str:
@@ -281,6 +290,28 @@ def phase_for(prompts: PromptKind, step: int) -> str:
     return "q2a"
 
 
+def planned_calls(prompts: PromptKind, steps: int, panel: int) -> int:
+    """Return the transform and judge calls for one run.
+
+    Args:
+        prompts: `telephone`, `identity`, or `paraphrase`.
+        steps: Planned steps.
+        panel: Judge models times samples per comparison.
+
+    Returns:
+        The call count, including previous-answer comparisons.
+    """
+    previous = 0
+    seen_answer = False
+    for step in range(1, steps + 1):
+        if score_kind(phase_for(prompts, step)) != "fidelity":
+            continue
+        if seen_answer:
+            previous += 1
+        seen_answer = True
+    return steps + (steps + previous) * panel
+
+
 def score_kind(phase: str) -> ScoreKind:
     """Return the rubric for a phase.
 
@@ -306,19 +337,12 @@ def render_transform(phase: str, current: str) -> str:
         The rendered prompt.
     """
     if phase == "a2q":
-        return _rendered(A_TO_Q, answer=current)
+        return render_text(A_TO_Q, answer=current)
     if phase == "q2a":
-        return _rendered(Q_TO_A, question=current)
+        return render_text(Q_TO_A, question=current)
     if phase == "identity":
-        return _rendered(IDENTITY_TMPL, text=current)
-    return _rendered(PARAPHRASE_TMPL, text=current)
-
-
-def _rendered(template: Template, **values: str) -> str:
-    rendered: object = template.render(**values)
-    if not isinstance(rendered, str):
-        raise TypeError("prompt render did not return text")
-    return rendered
+        return render_text(IDENTITY_TMPL, text=current)
+    return render_text(PARAPHRASE_TMPL, text=current)
 
 
 def load_corpus(path: Path | None = None) -> Corpus:
@@ -415,7 +439,34 @@ def _seed(value: object) -> Seed:
         raise DesignError(f"{seed_id} is missing text")
     if not isinstance(split, str) or split not in _SPLITS:
         raise DesignError(f"{seed_id} has an unknown split")
-    return Seed(id=seed_id, domain=domain, text=text, split=split)
+    return Seed(
+        id=seed_id,
+        domain=domain,
+        text=text,
+        split=split,
+        claims=_claims(seed_id, fields.get("claim")),
+    )
+
+
+def _claims(seed_id: str, value: object) -> tuple[Claim, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise DesignError(f"{seed_id} claims must be a list")
+    claims: list[Claim] = []
+    for item in value:
+        fields = _object(item, f"{seed_id} claim")
+        claim_id = fields.get("id")
+        text = fields.get("text")
+        if not isinstance(claim_id, str) or claim_id == "":
+            raise DesignError(f"{seed_id} claim is missing id")
+        if not isinstance(text, str) or text.strip() == "":
+            raise DesignError(f"{seed_id} claim is missing text")
+        claims.append(Claim(id=claim_id, text=text))
+    ids = [claim.id for claim in claims]
+    if len(ids) != len(set(ids)):
+        raise DesignError(f"{seed_id} claim ids are not unique")
+    return tuple(claims)
 
 
 def _object(value: object, label: str) -> dict[str, object]:

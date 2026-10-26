@@ -6,11 +6,31 @@ domain = "databases"
 split = "study"
 text = "Redis uses single-threaded event loops with epoll for I/O multiplexing"
 
+[[seed.claim]]
+id = "event-loop"
+text = "single-threaded event loop"
+
+[[seed.claim]]
+id = "epoll"
+text = "epoll for I/O multiplexing"
+
 [[seed]]
 id = "tcp-aimd"
 domain = "networking"
 split = "study"
 text = "TCP congestion control uses slow start and AIMD algorithms to prevent network overload"
+
+[[seed.claim]]
+id = "slow-start"
+text = "slow start"
+
+[[seed.claim]]
+id = "aimd"
+text = "AIMD"
+
+[[seed.claim]]
+id = "overload"
+text = "slow start and AIMD prevent overload"
 
 [[seed]]
 id = "btree-index"
@@ -18,11 +38,27 @@ domain = "databases"
 split = "study"
 text = "B-tree database indices maintain sorted data with O(log n) search complexity"
 
+[[seed.claim]]
+id = "sorted"
+text = "sorted data"
+
+[[seed.claim]]
+id = "complexity"
+text = "O(log n) search"
+
 [[seed]]
 id = "docker-cow"
 domain = "containers"
 split = "study"
 text = "Docker containers use copy-on-write filesystems for efficient storage layering"
+
+[[seed.claim]]
+id = "copy-on-write"
+text = "copy-on-write filesystem"
+
+[[seed.claim]]
+id = "layering"
+text = "used for storage layering"
 
 [[seed]]
 id = "jwt-hmac"
@@ -30,11 +66,27 @@ domain = "security"
 split = "study"
 text = "JWT authentication tokens contain base64-encoded JSON with HMAC signatures for security"
 
+[[seed.claim]]
+id = "payload"
+text = "base64-encoded JSON"
+
+[[seed.claim]]
+id = "signature"
+text = "HMAC signature"
+
 [[seed]]
 id = "k8s-etcd"
 domain = "orchestration"
 split = "study"
 text = "Kubernetes uses etcd for distributed configuration storage with Raft consensus"
+
+[[seed.claim]]
+id = "etcd"
+text = "etcd for distributed configuration"
+
+[[seed.claim]]
+id = "raft"
+text = "Raft consensus"
 
 [[seed]]
 id = "git-objects"
@@ -42,11 +94,27 @@ domain = "storage"
 split = "study"
 text = "Git stores each file version as a content-addressed blob whose name is the SHA-1 of its bytes"
 
+[[seed.claim]]
+id = "blob"
+text = "content-addressed blob"
+
+[[seed.claim]]
+id = "sha1"
+text = "name is the SHA-1 of the bytes"
+
 [[seed]]
 id = "tls-handshake"
 domain = "security"
 split = "study"
 text = "TLS 1.3 finishes a handshake with an ephemeral Diffie-Hellman secret and then encrypts application data with an AEAD cipher"
+
+[[seed.claim]]
+id = "diffie-hellman"
+text = "ephemeral Diffie-Hellman handshake secret"
+
+[[seed.claim]]
+id = "aead"
+text = "AEAD for application data"
 
 [[seed]]
 id = "sql-wal"
@@ -54,11 +122,27 @@ domain = "databases"
 split = "study"
 text = "A write-ahead log records committed changes before they are applied to the table pages so a crash can replay them"
 
+[[seed.claim]]
+id = "ordering"
+text = "committed changes recorded before table pages"
+
+[[seed.claim]]
+id = "replay"
+text = "crash replay"
+
 [[seed]]
 id = "dns-recursive"
 domain = "networking"
 split = "study"
 text = "A recursive resolver walks the DNS hierarchy from the root until an authoritative server returns the record"
+
+[[seed.claim]]
+id = "root"
+text = "walk starts at the root"
+
+[[seed.claim]]
+id = "authoritative"
+text = "ends at an authoritative answer"
 
 [[seed]]
 id = "utf8-encoding"
@@ -66,8 +150,24 @@ domain = "text"
 split = "held-out"
 text = "UTF-8 encodes Unicode code points as one to four bytes, and ASCII bytes keep their original values"
 
+[[seed.claim]]
+id = "width"
+text = "one to four bytes per code point"
+
+[[seed.claim]]
+id = "ascii"
+text = "ASCII bytes unchanged"
+
 [[seed]]
 id = "consistent-hashing"
 domain = "distributed-systems"
 split = "held-out"
 text = "Consistent hashing places nodes on a ring so adding a node moves only the keys in the neighboring arc"
+
+[[seed.claim]]
+id = "ring"
+text = "nodes on a ring"
+
+[[seed.claim]]
+id = "neighbor"
+text = "a new node moves only the neighboring arc"

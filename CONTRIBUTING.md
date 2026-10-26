@@ -46,7 +46,7 @@ Checks in this document do not need an OpenRouter API key. The only step that sp
 
 ## Tests
 
-The default suite is offline. It does not read `OPENROUTER_API_KEY`. It fails if a test opens a network socket.
+The default suite is offline. It does not read `OPENROUTER_API_KEY`. It fails if a test opens a network socket. `tests/cassettes/openrouter-chat.json` is a sanitized chat body with no request headers. The suite replays it through the existing HTTP transport. It is not a live capture.
 
 ```bash
 uv run pytest
@@ -92,7 +92,9 @@ Edit the table in [`echochain/design.py`](echochain/design.py). A condition name
 
 This step calls OpenRouter and spends money. Nothing else in this document does.
 
-Pass `--budget` with a USD amount to stop once spend reaches that cap. The process exits with code 3 and records `budget_exceeded`. A run with no budget completes the planned 30 steps. It can also stop for a generation failure, too many unscored judge replies, or an interrupt. The process prints the termination reason. Plan for up to 30 steps, each with one transform call and one judge call.
+Pass `--budget` with a USD amount to stop once spend reaches that cap. The process exits with code 3 and records `budget_exceeded`. A run with no budget completes the planned 30 steps. It can also stop for a generation failure, too many unscored judge replies, or an interrupt. The process prints the termination reason. Plan for up to 30 steps. Each step has one transform, and each comparison has the configured judge samples. From the second answer onward there is a second comparison against the previous answer.
+
+[`.github/workflows/smoke.yml`](.github/workflows/smoke.yml) runs that check nightly and on demand. It runs `echochain models` and one cycle with `--max-cycles 1 --repeats 1 --budget 0.10 --yes`. A missing `OPENROUTER_API_KEY` secret skips the job. A retired model fails preflight. The bogus-id failure is the offline preflight test.
 
 ```bash
 export OPENROUTER_API_KEY="your-api-key-here"

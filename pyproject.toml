@@ -98,7 +98,6 @@ convention = "google"
 "tools/**" = ["D"]
 "results/**" = ["D100"]
 "echochain/**" = ["D100", "D101", "D104", "D105"]
-"echochain/prompts.py" = ["E501"]
 
 [tool.pytest.ini_options]
 addopts = "--disable-socket --allow-unix-socket --cov=echochain --cov-report=term-missing"

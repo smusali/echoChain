@@ -18,15 +18,18 @@ ROTATING_MODELS = [
     "mistralai/mistral-small-2603",
 ]
 JUDGE_MODEL = "openai/gpt-4.1-mini"
-JUDGE_SAMPLES = 1
-JUDGE_TEMPERATURE = 0.0
+JUDGE_SAMPLES = 3
+JUDGE_TEMPERATURE = 0.5
 TRANSFORM_TEMPERATURE = 0.3
+TOP_P = 1.0
 MAX_CYCLES = 30
 MAX_TOKENS = 1024
 STOP_SCORE = 2.0
 STOP_CONSECUTIVE = 0
 SCORE_MIN = 1
 SCORE_MAX = 10
+ANCHORED_MIN = 1
+ANCHORED_MAX = 5
 JUDGE_ERROR_NUMERATOR = 1
 JUDGE_ERROR_DENOMINATOR = 10
 CALL_DEADLINE_SECONDS = 60.0
@@ -216,6 +219,8 @@ class Settings:
     seed: str | None
     split: str | None
     start: str | None
+    sampling_seed: int | None
+    top_p: float
 
 
 @dataclass(frozen=True)
@@ -238,6 +243,7 @@ _INTEGERS = frozenset(
         "judge_error_numerator",
         "judge_error_denominator",
         "repeats",
+        "sampling_seed",
     }
 )
 _FLOATS = frozenset(
@@ -248,6 +254,7 @@ _FLOATS = frozenset(
         "deadline_seconds",
         "budget",
         "confirm_above_usd",
+        "top_p",
     }
 )
 _FLOORS = {
@@ -255,6 +262,7 @@ _FLOORS = {
     "max_cycles": 1,
     "max_tokens": 1,
     "repeats": 1,
+    "sampling_seed": 1,
     "judge_error_denominator": 1,
     "stop_consecutive": 0,
     "judge_error_numerator": 0,
@@ -290,6 +298,8 @@ _ENV = {
     "split": "ECHOCHAIN_SPLIT",
     "start": "ECHOCHAIN_START",
     "providers": "ECHOCHAIN_PROVIDERS",
+    "sampling_seed": "ECHOCHAIN_SAMPLING_SEED",
+    "top_p": "ECHOCHAIN_TOP_P",
 }
 _FLAGS = {
     "models": "--model",
@@ -321,6 +331,8 @@ _FLAGS = {
     "split": "--split",
     "start": "--start",
     "providers": "--provider",
+    "sampling_seed": "--sampling-seed",
+    "top_p": "--top-p",
 }
 _FILE_KEYS = frozenset(_ENV) | {"providers"}
 
@@ -420,6 +432,8 @@ def _defaults() -> dict[str, _Bound]:
         "confirm_above_usd": CONFIRM_ABOVE_USD,
         "condition": ("alternate",),
         "providers": (),
+        "sampling_seed": None,
+        "top_p": TOP_P,
     }
     return {key: _Bound(value, source) for key, value in values.items()}
 
@@ -560,13 +574,19 @@ def _decode_number(source: str, key: str, value: object) -> int | float:
         return _at_least(source, key, value, floor)
     if key in {"score_min", "score_max"}:
         return _integer(source, key, value)
-    if key in {"temperature", "judge_temperature"}:
-        return _temperature(source, key, value)
+    if key in {"temperature", "judge_temperature", "top_p"}:
+        return _scaled(source, key, value)
     if key == "deadline_seconds":
         return _deadline(source, key, value)
     if key in {"budget", "confirm_above_usd"}:
         return _non_negative(source, key, value)
     return _number(source, key, value)
+
+
+def _scaled(source: str, key: str, value: object) -> float:
+    if key == "top_p":
+        return _unit_interval(source, key, value)
+    return _temperature(source, key, value)
 
 
 def _decode_text(source: str, key: str, value: object) -> str:
@@ -579,6 +599,13 @@ def _decode_text(source: str, key: str, value: object) -> str:
     if key in _PLAIN:
         return _plain(source, key, value)
     raise ConfigError(f"{source}: unknown key {key}")
+
+
+def _unit_interval(source: str, key: str, value: object) -> float:
+    number = _number(source, key, value)
+    if number < 0 or number > 1:
+        raise ConfigError(f"{source}: {key} must be from 0 to 1")
+    return number
 
 
 def _temperature(source: str, key: str, value: object) -> float:
@@ -624,6 +651,29 @@ def _split(source: str, key: str, value: object) -> str:
     return text
 
 
+def model_family(model_id: str) -> str:
+    """Return the vendor family of a model id.
+
+    Args:
+        model_id: OpenRouter model id.
+
+    Returns:
+        The slug before the first slash, or the whole id when it has none.
+    """
+    vendor, separator, _name = model_id.partition("/")
+    if separator == "" or vendor == "":
+        return model_id
+    return vendor
+
+
+def _reject_shared_family(models: tuple[str, ...], judges: tuple[str, ...]) -> None:
+    generated = {model_family(model) for model in models}
+    for judge in judges:
+        family = model_family(judge)
+        if family in generated:
+            raise ConfigError(f"judge {judge} shares a family with a generator")
+
+
 def _finalize(bounds: dict[str, _Bound]) -> Settings:
     score_min = _need_int(bounds, "score_min")
     score_max = _need_int(bounds, "score_max")
@@ -636,9 +686,12 @@ def _finalize(bounds: dict[str, _Bound]) -> Settings:
         if bounds["budget"].value is None
         else _as_float(bounds["budget"], "budget")
     )
+    models = _need_strings(bounds, "models")
+    judges = _need_strings(bounds, "judge")
+    _reject_shared_family(models, judges)
     return Settings(
-        models=_need_strings(bounds, "models"),
-        judge=_need_strings(bounds, "judge"),
+        models=models,
+        judge=judges,
         judge_samples=_need_int(bounds, "judge_samples"),
         judge_temperature=_as_float(bounds["judge_temperature"], "judge_temperature"),
         temperature=_as_float(bounds["temperature"], "temperature"),
@@ -666,6 +719,8 @@ def _finalize(bounds: dict[str, _Bound]) -> Settings:
         seed=_optional_str(bounds, "seed"),
         split=_optional_str(bounds, "split"),
         start=_optional_str(bounds, "start"),
+        sampling_seed=_optional_int(bounds, "sampling_seed"),
+        top_p=_as_float(bounds["top_p"], "top_p"),
     )
 
 
@@ -715,7 +770,18 @@ def _payload(settings: Settings) -> dict[str, object]:
         "stop_score": settings.stop_score,
         "temperature": settings.temperature,
         "title": settings.title,
+        "top_p": settings.top_p,
+        "sampling_seed": settings.sampling_seed,
     }
+
+
+def _optional_int(bounds: dict[str, _Bound], key: str) -> int | None:
+    value = bounds[key].value
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ConfigError(f"{bounds[key].source}: {key} must be an integer")
+    return value
 
 
 def _need_int(bounds: dict[str, _Bound], key: str) -> int:

@@ -89,6 +89,26 @@ jobs:
         run: |
           uv run python -m build
           uv run twine check --strict dist/*
+          uv run python - <<'PY'
+          import zipfile
+          from pathlib import Path
+          wheels = list(Path("dist").glob("*.whl"))
+          if len(wheels) != 1:
+              raise SystemExit(f"expected one wheel, found {wheels}")
+          names = set(zipfile.ZipFile(wheels[0]).namelist())
+          needed = [
+              "echochain/prompts/a2q.j2",
+              "echochain/prompts/q2a.j2",
+              "echochain/prompts/identity.j2",
+              "echochain/prompts/paraphrase.j2",
+              "echochain/prompts/judge_system.j2",
+              "echochain/prompts/judge_user.j2",
+              "echochain/prompts/answerability_user.j2",
+          ]
+          missing = [name for name in needed if name not in names]
+          if missing:
+              raise SystemExit(f"wheel is missing {missing}")
+          PY
 
   pip-audit:
     name: pip-audit

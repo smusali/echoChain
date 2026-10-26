@@ -4,14 +4,16 @@ import argparse
 import csv
 import json
 import logging
+import secrets
 import statistics
 import sys
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
 from echochain import __version__
 from echochain import client as client_mod
+from echochain.analyze import AnalyzeError, report
 from echochain.client import ModelRecord
 from echochain.config import (
     ConfigError,
@@ -35,14 +37,17 @@ from echochain.design import (
     load_corpus,
     model_for,
     phase_for,
+    planned_calls,
     render_transform,
     resolve_conditions,
     score_kind,
     select_seeds,
 )
 from echochain.engine import cycle
+from echochain.judge import Claim, claim_block
 from echochain.persistence import (
     EmptySeedError,
+    Manifest,
     ManifestDesign,
     Recorder,
     ResumePlan,
@@ -56,6 +61,7 @@ from echochain.prompts import (
     ANSWERABILITY_USER_TMPL,
     JUDGE_SYS,
     JUDGE_USER_TMPL,
+    render_text,
 )
 
 _EXIT_BUDGET = 3
@@ -90,6 +96,7 @@ class PlannedSeed:
     text: str
     corpus_version: str | None
     corpus_sha256: str | None
+    claims: tuple[Claim, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -112,10 +119,14 @@ class Batch:
         """Return the maximum number of model calls.
 
         Returns:
-            One transform and the judge samples for every planned step.
+            Transforms, seed comparisons, and previous-answer comparisons.
         """
-        per_step = 1 + len(self.settings.judge) * self.settings.judge_samples
-        return self.run_count * self.settings.max_cycles * per_step
+        panel = len(self.settings.judge) * self.settings.judge_samples
+        per_condition = sum(
+            planned_calls(condition.prompts, self.settings.max_cycles, panel)
+            for condition in self.conditions
+        )
+        return per_condition * len(self.seeds) * self.settings.repeats
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -159,7 +170,7 @@ def _dispatch(args: argparse.Namespace) -> int:
     if args.command == "export":
         return _export(args.directory)
     if args.command == "analyze":
-        return _analyze(args.directory)
+        return _analyze(args.directory, args.out)
     overrides = _overrides(args) if args.command == "run" else None
     settings = resolve_settings(config=args.config, overrides=overrides)
     if args.command == "config":
@@ -204,8 +215,11 @@ def _parser() -> argparse.ArgumentParser:
     export = sub.add_parser("export", help="Write CSV derived from a run's JSONL.")
     export.add_argument("directory", type=Path, metavar="RUN")
     export.add_argument("--format", default="csv", choices=("csv",))
-    analyze = sub.add_parser("analyze", help="Summarize fidelity for one run.")
-    analyze.add_argument("directory", type=Path, metavar="RUN")
+    analyze = sub.add_parser(
+        "analyze", help="Summarize claim fidelity, survival, and log-rank tests."
+    )
+    analyze.add_argument("directory", nargs="+", type=Path, metavar="RUN")
+    analyze.add_argument("--out", type=Path, help="Directory for tables and figures.")
     sub.add_parser("models", help="Check configured models against the catalog.")
     return parser
 
@@ -222,6 +236,8 @@ def _add_run_flags(run: argparse.ArgumentParser) -> None:
         help="Condition name. Repeat to run several. 'all' runs the controls.",
     )
     run.add_argument("--repeats", type=int, help="Repetitions of each pair.")
+    run.add_argument("--sampling-seed", type=int, help="Base sampling seed.")
+    run.add_argument("--top-p", type=float, help="Nucleus sampling cutoff.")
     run.add_argument("--dry-run", action="store_true", help="Print the cost bound.")
     run.add_argument("--yes", action="store_true", help="Start a run over the cap.")
     run.add_argument("--out", type=Path, help="Directory that receives run folders.")
@@ -323,6 +339,8 @@ def _overrides(args: argparse.Namespace) -> dict[str, object]:
         put("seeds", args.corpus)
     put("condition", args.condition)
     put("repeats", args.repeats)
+    put("sampling_seed", args.sampling_seed)
+    put("top_p", args.top_p)
     put("out", args.out)
     put("budget", args.budget)
     put("models", args.models)
@@ -376,6 +394,7 @@ def _batch(settings: Settings) -> Batch:
                 text=settings.start,
                 corpus_version=None,
                 corpus_sha256=None,
+                claims=(),
             ),
         )
     elif settings.seed is not None or settings.split is not None:
@@ -397,6 +416,7 @@ def _planned(corpus: Corpus, seed: Seed) -> PlannedSeed:
         text=seed.text,
         corpus_version=corpus.version,
         corpus_sha256=corpus.sha256,
+        claims=seed.claims,
     )
 
 
@@ -450,6 +470,9 @@ def _one(
     api_key: str,
     progress: Callable[[StepNote], None] | None,
 ) -> tuple[Path, TerminationReason]:
+    base = settings.sampling_seed
+    if base is None:
+        base = secrets.randbelow(2**31 - 1) + 1
     spec = replace(
         default_spec(
             condition,
@@ -468,6 +491,9 @@ def _one(
         judge_error_numerator=settings.judge_error_numerator,
         judge_error_denominator=settings.judge_error_denominator,
         on_step=progress,
+        claims=seed.claims,
+        sampling_seed=base,
+        top_p=settings.top_p,
     )
     allocated = mk_exp_dir(seed.text, settings.out)
     manifest = running_manifest(
@@ -513,6 +539,8 @@ def _design(spec: RunSpec, settings: Settings) -> ManifestDesign:
         deadline_seconds=settings.deadline_seconds,
         rubric_version=settings.rubric_version,
         requested_models=(*settings.models, *settings.judge),
+        sampling_seed=spec.sampling_seed,
+        top_p=spec.top_p,
     )
 
 
@@ -599,6 +627,10 @@ def _resume_spec(
         start_step=plan.next_step,
         opening_text=plan.current,
         spent=plan.spent,
+        claims=_resume_claims(manifest),
+        sampling_seed=manifest["sampling_seed"],
+        top_p=manifest["top_p"],
+        previous_answer=_previous_answer(plan.rows),
     )
 
 
@@ -652,22 +684,12 @@ def _export(directory: Path) -> int:
     return 0
 
 
-def _analyze(directory: Path) -> int:
-    groups: dict[tuple[str, int], list[int | float]] = {}
-    for row in _rows(directory):
-        value = _fidelity(row)
-        condition = row.get("condition")
-        step = row.get("step")
-        if value is None or not isinstance(condition, str):
-            continue
-        if isinstance(step, bool) or not isinstance(step, int):
-            continue
-        groups.setdefault((condition, step), []).append(value)
-    print("condition\tstep\tcount\tmean_fidelity")
-    for condition, step in sorted(groups):
-        values = groups[(condition, step)]
-        mean = statistics.mean(values)
-        print(f"{condition}\t{step}\t{len(values)}\t{mean:.6f}")
+def _analyze(directories: Sequence[Path], out: Path | None) -> int:
+    try:
+        text = report(directories, out=out)
+    except AnalyzeError as exc:
+        raise UsageError(str(exc)) from exc
+    print(text, end="")
     return 0
 
 
@@ -732,16 +754,6 @@ def _csv_score(row: Mapping[str, object]) -> str:
     return str(statistics.mean(scores))
 
 
-def _fidelity(row: Mapping[str, object]) -> int | float | None:
-    judge = row.get("judge")
-    if not isinstance(judge, dict):
-        return None
-    value = judge.get("fidelity_vs_seed")
-    if isinstance(value, bool) or not isinstance(value, int | float):
-        return None
-    return value
-
-
 def _optional_catalog(settings: Settings) -> dict[str, ModelRecord] | None:
     try:
         api_key = load_api_key()
@@ -760,7 +772,9 @@ def _bounds(
     priced = True
     for seed in batch.seeds:
         for condition in batch.conditions:
-            step_tokens, step_cost = _bound_run(seed.text, condition, settings, catalog)
+            step_tokens, step_cost = _bound_run(
+                seed.text, condition, settings, catalog, seed.claims
+            )
             tokens += step_tokens * settings.repeats
             if step_cost is None:
                 priced = False
@@ -776,10 +790,12 @@ def _bound_run(
     condition: Condition,
     settings: Settings,
     catalog: Mapping[str, ModelRecord] | None,
+    claims: tuple[Claim, ...] = (),
 ) -> tuple[int, float | None]:
     tokens = 0
     cost = 0.0
     known = True
+    first_fidelity = 2 if condition.prompts == "telephone" else 1
     for step in range(1, settings.max_cycles + 1):
         phase = phase_for(condition.prompts, step)
         model = model_for(condition.schedule, settings.models, step)
@@ -795,14 +811,15 @@ def _bound_run(
         else:
             cost += transform
         kind = score_kind(phase)
-        judge_prompt = _judge_prompt_tokens(kind, seed, settings.max_tokens)
+        panels = 2 if kind == "fidelity" and step > first_fidelity else 1
+        judge_prompt = _judge_prompt_tokens(kind, seed, settings.max_tokens, claims)
         for judge in settings.judge:
             unit = _priced(
                 None if catalog is None else catalog.get(judge),
                 judge_prompt,
                 settings.max_tokens,
             )
-            for _sample in range(settings.judge_samples):
+            for _sample in range(settings.judge_samples * panels):
                 tokens += judge_prompt + settings.max_tokens
                 if unit is None:
                     known = False
@@ -833,14 +850,49 @@ def _transform_prompt_tokens(phase: str, seed: str, step: int, max_tokens: int) 
     return len(render_transform(phase, "")) + inserted + _FRAMING_TOKENS
 
 
-def _judge_prompt_tokens(kind: str, seed: str, max_tokens: int) -> int:
+def _judge_prompt_tokens(
+    kind: str,
+    seed: str,
+    max_tokens: int,
+    claims: tuple[Claim, ...] = (),
+) -> int:
     if kind == "answerability":
-        rendered: object = ANSWERABILITY_USER_TMPL.render(question="", seed="")
+        rendered = render_text(ANSWERABILITY_USER_TMPL, question="", seed="")
     else:
-        rendered = JUDGE_USER_TMPL.render(original="", transformed="")
-    if not isinstance(rendered, str):
-        raise TypeError("prompt render did not return text")
+        rendered = render_text(
+            JUDGE_USER_TMPL,
+            original="",
+            transformed="",
+            claims=claim_block(claims),
+        )
     return len(JUDGE_SYS) + len(rendered) + len(seed) + max_tokens + _FRAMING_TOKENS
+
+
+def _resume_claims(manifest: Manifest) -> tuple[Claim, ...]:
+    seed_id = manifest["seed_id"]
+    if seed_id is None:
+        return ()
+    try:
+        corpus = load_corpus()
+    except DesignError:
+        return ()
+    if corpus.sha256 != manifest["corpus_sha256"]:
+        return ()
+    for seed in corpus.seeds:
+        if seed.id == seed_id:
+            return seed.claims
+    return ()
+
+
+def _previous_answer(rows: tuple[Mapping[str, object], ...]) -> str | None:
+    found: str | None = None
+    for row in rows:
+        if row.get("score_kind") != "fidelity":
+            continue
+        text = row.get("output_text")
+        if isinstance(text, str):
+            found = text
+    return found
 
 
 def _on_step(*, verbose: bool) -> Callable[[StepNote], None]:
