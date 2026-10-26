@@ -13,6 +13,12 @@ Next release is `0.2.0`, tracked in [Upgrade to v0.2.0](https://github.com/smusa
 
 ### Added
 
+- Rubric version 2 asks for an anchored 1 to 5 score and the existing 1 to 10 score, plus one verdict per frozen corpus claim. Claim fidelity is the primary metric. The stop rule still reads the 1 to 10 mean.
+- Later answers are judged against the previous answer as well as the seed.
+- Each call sends `top_p` and a derived sampling seed. The manifest stores `sampling_seed`, and a row stores whether the provider echoed the seed.
+- `echochain analyze` prints clustered bootstrap intervals, a Kaplan-Meier table, and pairwise log-rank tests, and can write those tables plus two SVG figures.
+- `docs/METHODOLOGY.md` and `docs/judge-validation.md` define the measurement and the agreement gate. The labels for that gate are not collected.
+- A sanitized chat cassette is replayed in the offline suite. `.github/workflows/smoke.yml` runs one live cycle nightly when an API key is configured.
 - `echochain run --resume` continues an interrupted, failed, or unfinished run from its last complete step.
 - Provider pins accept `data_collection` and `zdr`.
 - CI enforces 80% coverage and runs `pip-audit`. Dependabot watches the lock file and GitHub Actions.

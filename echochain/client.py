@@ -75,7 +75,9 @@ class Completion:
     latency_seconds: float
     temperature: float
     max_tokens: int
-    sampling_seed: None
+    sampling_seed: int | None
+    top_p: float
+    seed_honored: bool | None
 
 
 class GenerationError(Exception):
@@ -123,13 +125,15 @@ class ModelUnavailableError(RuntimeError):
 
 
 class ChatClient(Protocol):
-    def chat(
+    def chat(  # noqa: PLR0913
         self,
         model: str,
         messages: Sequence[ChatMessage],
         temperature: float,
         *,
         response_format: ResponseFormatJSONSchema | None = None,
+        seed: int | None = None,
+        top_p: float = 1.0,
     ) -> Completion:
         """Request a completion.
 
@@ -139,6 +143,8 @@ class ChatClient(Protocol):
             temperature: Sampling temperature.
             response_format: Structured output schema. When set, the provider
                 must support it.
+            seed: Sampling seed. None lets the provider choose.
+            top_p: Nucleus sampling cutoff.
 
         Returns:
             The completion, including usage and the model that served it.
@@ -261,13 +267,15 @@ class OpenRouterClient:
         self._http = None
         self._deadline_transport = None
 
-    def chat(
+    def chat(  # noqa: PLR0913
         self,
         model: str,
         messages: Sequence[ChatMessage],
         temperature: float,
         *,
         response_format: ResponseFormatJSONSchema | None = None,
+        seed: int | None = None,
+        top_p: float = 1.0,
     ) -> Completion:
         """Request a completion.
 
@@ -277,6 +285,8 @@ class OpenRouterClient:
             temperature: Sampling temperature.
             response_format: Structured output schema. When set, the provider
                 must support it.
+            seed: Sampling seed. None lets the provider choose.
+            top_p: Nucleus sampling cutoff.
 
         Returns:
             The completion. A rejected reply is tried once more.
@@ -286,9 +296,19 @@ class OpenRouterClient:
             CallDeadlineError: The call exceeded its wall-clock deadline.
         """
         waits = 0
+        call = _Outbound(
+            model,
+            messages,
+            temperature,
+            response_format,
+            self._max_tokens,
+            _provider_body(self._pins, model),
+            top_p,
+            seed,
+        )
         while True:
             try:
-                return self._exchange(model, messages, temperature, response_format)
+                return self._exchange(call)
             except APIStatusError as exc:
                 limit = _wait_limit(exc.status_code)
                 if limit is None or waits >= limit:
@@ -296,30 +316,16 @@ class OpenRouterClient:
                 waits += 1
                 time.sleep(_pause_seconds(exc))
 
-    def _exchange(
-        self,
-        model: str,
-        messages: Sequence[ChatMessage],
-        temperature: float,
-        response_format: ResponseFormatJSONSchema | None,
-    ) -> Completion:
-        first, usable = self._once(model, messages, temperature, response_format)
+    def _exchange(self, call: _Outbound) -> Completion:
+        first, usable = self._once(call)
         if usable:
             return first
-        second, second_usable = self._once(
-            model, messages, temperature, response_format
-        )
+        second, second_usable = self._once(call)
         if second_usable:
             return merge_attempts((first, second))
         raise GenerationError((first, second))
 
-    def _once(
-        self,
-        model: str,
-        messages: Sequence[ChatMessage],
-        temperature: float,
-        response_format: ResponseFormatJSONSchema | None,
-    ) -> tuple[Completion, bool]:
+    def _once(self, call: _Outbound) -> tuple[Completion, bool]:
         gate = self._deadline_transport
         client = self._sdk
         if gate is None or client is None:
@@ -327,22 +333,9 @@ class OpenRouterClient:
         deadline = time.monotonic() + self._deadline_seconds
         gate.deadline = deadline
         started = time.perf_counter()
-        response = _send(
-            client,
-            deadline,
-            _Outbound(
-                model,
-                messages,
-                temperature,
-                response_format,
-                self._max_tokens,
-                _provider_body(self._pins, model),
-            ),
-        )
+        response = _send(client, deadline, call)
         latency = time.perf_counter() - started
-        completion = _completion(
-            response, model, temperature, latency, self._max_tokens
-        )
+        completion = _completion(response, call, latency)
         return completion, _usable(completion, _refused(response))
 
 
@@ -385,7 +378,9 @@ def merge_attempts(attempts: Sequence[Completion]) -> Completion:
         latency_seconds=latency,
         temperature=last.temperature,
         max_tokens=last.max_tokens,
-        sampling_seed=None,
+        sampling_seed=last.sampling_seed,
+        top_p=last.top_p,
+        seed_honored=last.seed_honored,
     )
 
 
@@ -498,6 +493,8 @@ class _Outbound:
     response_format: ResponseFormatJSONSchema | None
     max_tokens: int
     extra: _ProviderExtra
+    top_p: float
+    seed: int | None
 
 
 def _provider_body(pins: Mapping[str, ProviderPin], model: str) -> _ProviderExtra:
@@ -541,10 +538,15 @@ def _send(client: OpenAI, deadline: float, call: _Outbound) -> ChatCompletion:
         if remaining <= 0:
             raise CallDeadlineError("call deadline exceeded")
         try:
+            seed: int | Omit = omit
+            if call.seed is not None:
+                seed = call.seed
             return client.chat.completions.create(
                 model=call.model,
                 messages=_to_openai(call.messages),
                 temperature=call.temperature,
+                top_p=call.top_p,
+                seed=seed,
                 max_tokens=call.max_tokens,
                 timeout=_timeout(remaining),
                 response_format=schema,
@@ -612,11 +614,7 @@ def _timeout(remaining: float) -> httpx2.Timeout:
 
 
 def _completion(
-    response: ChatCompletion,
-    model: str,
-    temperature: float,
-    latency: float,
-    max_tokens: int,
+    response: ChatCompletion, call: _Outbound, latency: float
 ) -> Completion:
     if not response.choices:
         text = ""
@@ -627,19 +625,33 @@ def _completion(
         text = content.strip() if isinstance(content, str) else ""
         finish_reason = response.choices[0].finish_reason
     served = response.model if response.model else ""
+    echoed = _echoed_seed(response)
+    honored = None if call.seed is None or echoed is None else echoed == call.seed
     return Completion(
         text=text,
         finish_reason=finish_reason,
-        requested_model=model,
+        requested_model=call.model,
         served_model=served,
         provider=_provider(response),
         generation_id=response.id,
         usage=_usage(response.usage),
         latency_seconds=latency,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        sampling_seed=None,
+        temperature=call.temperature,
+        max_tokens=call.max_tokens,
+        sampling_seed=call.seed,
+        top_p=call.top_p,
+        seed_honored=honored,
     )
+
+
+def _echoed_seed(response: ChatCompletion) -> int | None:
+    extra = response.model_extra
+    if extra is None:
+        return None
+    raw = extra.get("seed")
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        return None
+    return raw
 
 
 def _usable(completion: Completion, refused: bool) -> bool:

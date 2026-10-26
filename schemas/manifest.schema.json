@@ -24,6 +24,7 @@
     "served_models",
     "providers",
     "temperatures",
+    "top_p",
     "sampling_seed",
     "max_cycles",
     "max_tokens",
@@ -120,7 +121,13 @@
         "judge": {"type": "number"}
       }
     },
-    "sampling_seed": {"type": "null"},
+    "top_p": {"type": "number", "minimum": 0, "maximum": 1},
+    "sampling_seed": {
+      "anyOf": [
+        {"type": "integer", "minimum": 1},
+        {"type": "null"}
+      ]
+    },
     "max_cycles": {"type": "integer"},
     "max_tokens": {"type": "integer"},
     "stop_rule": {
