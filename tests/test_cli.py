@@ -24,26 +24,47 @@ from echochain.client import (
     CallDeadlineError,
     ChatMessage,
     Completion,
+    GenerationError,
     ModelRecord,
     OpenRouterClient,
     Usage,
     parse_catalog,
 )
 from echochain.config import (
+    CALL_DEADLINE_SECONDS,
+    CONFIRM_ABOVE_USD,
     JUDGE_ERROR_DENOMINATOR,
     JUDGE_ERROR_NUMERATOR,
     JUDGE_MODEL,
+    JUDGE_SAMPLES,
+    JUDGE_TEMPERATURE,
     MAX_CYCLES,
     MAX_TOKENS,
     MISSING_API_KEY,
+    OPENROUTER_API_BASE,
+    OPENROUTER_HEADERS,
     REDACTED,
+    REQUIRED_PARAMETERS,
     ROTATING_MODELS,
     SCORE_MAX,
+    SCORE_MIN,
+    STOP_CONSECUTIVE,
+    STOP_SCORE,
     TRANSFORM_TEMPERATURE,
+    ProviderPin,
     configured_models,
     load_api_key,
+    resolve_settings,
 )
-from echochain.design import RunSpec, default_spec, load_corpus, model_for, phase_for
+from echochain.design import (
+    RunSpec,
+    default_spec,
+    load_corpus,
+    model_for,
+    phase_for,
+    render_transform,
+    score_kind,
+)
 from echochain.engine import cycle
 from echochain.judge import parse_reply
 from echochain.persistence import (
@@ -53,6 +74,7 @@ from echochain.persistence import (
     mk_exp_dir,
     running_manifest,
 )
+from echochain.prompts import ANSWERABILITY_USER_TMPL, JUDGE_SYS, JUDGE_USER_TMPL
 from jsonschema import Draft202012Validator
 from openai import APIStatusError
 from openai.types.shared_params.response_format_json_schema import (
@@ -396,7 +418,7 @@ def test_preflight_missing_model(
     missing = configured_models()[0]
     del parameters[missing]
 
-    def fetch(_api_key: str) -> dict[str, ModelRecord]:
+    def fetch(_api_key: str, **_kwargs: object) -> dict[str, ModelRecord]:
         return _catalog(parameters)
 
     monkeypatch.setattr("echochain.client.fetch_catalog", fetch)
@@ -417,7 +439,7 @@ def test_preflight_missing_seed(
     parameters = _full_parameters()
     parameters[JUDGE_MODEL] = ["response_format"]
 
-    def fetch(_api_key: str) -> dict[str, ModelRecord]:
+    def fetch(_api_key: str, **_kwargs: object) -> dict[str, ModelRecord]:
         return _catalog(parameters)
 
     monkeypatch.setattr("echochain.client.fetch_catalog", fetch)
@@ -724,13 +746,13 @@ def test_budget_stops_run(
     assert main(["--start", _SEED, "--budget", "-1"]) == _EXIT_CONFIG
     assert "budget must be zero or greater" in capsys.readouterr().err
 
-    def fetch(_api_key: str) -> dict[str, ModelRecord]:
+    def fetch(_api_key: str, **_kwargs: object) -> dict[str, ModelRecord]:
         return _catalog(_full_parameters())
 
     monkeypatch.setattr("echochain.client.fetch_catalog", fetch)
     monkeypatch.setattr(
         "echochain.client.OpenRouterClient",
-        lambda _api_key: _FakeChat("preserved answer", cost=1.0),
+        lambda *_args, **_kwargs: _FakeChat("preserved answer", cost=1.0),
     )
     assert main(["--start", _SEED, "--budget", "0.5"]) == _EXIT_BUDGET
     message = capsys.readouterr().err
@@ -941,11 +963,14 @@ def _install_client(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
 
-    def fetch(_api_key: str) -> dict[str, ModelRecord]:
+    def fetch(_api_key: str, **_kwargs: object) -> dict[str, ModelRecord]:
         return _catalog(_full_parameters())
 
     monkeypatch.setattr("echochain.client.fetch_catalog", fetch)
-    monkeypatch.setattr("echochain.client.OpenRouterClient", lambda _api_key: client)
+    monkeypatch.setattr(
+        "echochain.client.OpenRouterClient",
+        lambda *_args, **_kwargs: client,
+    )
 
 
 def _run_cycle(
@@ -1221,7 +1246,7 @@ def test_dry_run_bounds_cost(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
 
-    def fetch(_api_key: str) -> dict[str, ModelRecord]:
+    def fetch(_api_key: str, **_kwargs: object) -> dict[str, ModelRecord]:
         priced: dict[str, ModelRecord] = {}
         for model_id, record in _catalog(_full_parameters()).items():
             priced[model_id] = ModelRecord(
@@ -1229,13 +1254,20 @@ def test_dry_run_bounds_cost(
                 parameters=record.parameters,
                 prompt_price=0.000001,
                 completion_price=0.000002,
+                request_price=0.0,
             )
         return priced
 
+    def forbid(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("dry-run constructed a client")
+
     monkeypatch.setattr("echochain.client.fetch_catalog", fetch)
+    monkeypatch.setattr("echochain.client.OpenRouterClient", forbid)
     assert main(["--dry-run", "--start", _SEED]) == 0
-    expected = MAX_CYCLES * 2 * MAX_TOKENS * 0.000003
-    assert f"cost_upper_bound_usd: {expected:.6f}" in capsys.readouterr().out
+    tokens, cost = _hand_bound(_SEED, 0.000001, 0.000002, 0.0)
+    output = capsys.readouterr().out
+    assert f"tokens_upper_bound: {tokens}" in output
+    assert f"cost_upper_bound_usd: {cost:.6f}" in output
 
 
 def test_corpus_is_versioned(
@@ -1304,3 +1336,666 @@ def test_judge_requests_strict_schema(tmp_path: Path) -> None:
     assert schema["name"] == "judge_score"
     provider = _object(bodies[1]["provider"])
     assert provider["require_parameters"] is True
+
+
+def _hand_bound(
+    seed: str,
+    prompt_price: float,
+    completion_price: float,
+    request_price: float,
+) -> tuple[int, float]:
+    framing = 16
+    tokens = 0
+    cost = 0.0
+    for step in range(1, MAX_CYCLES + 1):
+        phase = phase_for("telephone", step)
+        inserted = len(seed) if step == 1 else MAX_TOKENS
+        prompt_tokens = len(render_transform(phase, "")) + inserted + framing
+        tokens += prompt_tokens + MAX_TOKENS
+        cost += (
+            prompt_tokens * prompt_price + MAX_TOKENS * completion_price + request_price
+        )
+        kind = score_kind(phase)
+        if kind == "answerability":
+            rendered: object = ANSWERABILITY_USER_TMPL.render(question="", seed="")
+        else:
+            rendered = JUDGE_USER_TMPL.render(original="", transformed="")
+        if not isinstance(rendered, str):
+            raise TypeError("prompt render did not return text")
+        judge_prompt = len(JUDGE_SYS) + len(rendered) + len(seed) + MAX_TOKENS + framing
+        tokens += judge_prompt + MAX_TOKENS
+        cost += judge_prompt * prompt_price + MAX_TOKENS * completion_price
+        cost += request_price
+    return tokens, cost
+
+
+def _located(value: object, root: Path) -> object:
+    marker = ("path", "name")
+    if isinstance(value, tuple) and len(value) == len(marker) and value[0] == marker[0]:
+        name = value[1]
+        if not isinstance(name, str):
+            raise TypeError("path name must be a string")
+        return root / name
+    return value
+
+
+_PIN = ProviderPin
+_PRECEDENCE: tuple[tuple[object, ...], ...] = (
+    (
+        "max_cycles",
+        "max_cycles = 4\n",
+        "ECHOCHAIN_MAX_CYCLES",
+        "5",
+        {"max_cycles": 6},
+        4,
+        5,
+        6,
+        MAX_CYCLES,
+    ),
+    (
+        "max_tokens",
+        "max_tokens = 8\n",
+        "ECHOCHAIN_MAX_TOKENS",
+        "9",
+        {"max_tokens": 10},
+        8,
+        9,
+        10,
+        MAX_TOKENS,
+    ),
+    (
+        "repeats",
+        "repeats = 2\n",
+        "ECHOCHAIN_REPEATS",
+        "3",
+        {"repeats": 4},
+        2,
+        3,
+        4,
+        1,
+    ),
+    (
+        "judge_samples",
+        "judge_samples = 2\n",
+        "ECHOCHAIN_JUDGE_SAMPLES",
+        "3",
+        {"judge_samples": 4},
+        2,
+        3,
+        4,
+        JUDGE_SAMPLES,
+    ),
+    (
+        "stop_consecutive",
+        "stop_consecutive = 1\n",
+        "ECHOCHAIN_STOP_CONSECUTIVE",
+        "2",
+        {"stop_consecutive": 3},
+        1,
+        2,
+        3,
+        STOP_CONSECUTIVE,
+    ),
+    (
+        "score_min",
+        "score_min = 2\n",
+        "ECHOCHAIN_SCORE_MIN",
+        "3",
+        {"score_min": 4},
+        2,
+        3,
+        4,
+        SCORE_MIN,
+    ),
+    (
+        "score_max",
+        "score_max = 7\n",
+        "ECHOCHAIN_SCORE_MAX",
+        "8",
+        {"score_max": 9},
+        7,
+        8,
+        9,
+        SCORE_MAX,
+    ),
+    (
+        "judge_error_numerator",
+        "judge_error_numerator = 2\n",
+        "ECHOCHAIN_JUDGE_ERROR_NUMERATOR",
+        "3",
+        {"judge_error_numerator": 4},
+        2,
+        3,
+        4,
+        JUDGE_ERROR_NUMERATOR,
+    ),
+    (
+        "judge_error_denominator",
+        "judge_error_denominator = 2\n",
+        "ECHOCHAIN_JUDGE_ERROR_DENOMINATOR",
+        "3",
+        {"judge_error_denominator": 4},
+        2,
+        3,
+        4,
+        JUDGE_ERROR_DENOMINATOR,
+    ),
+    (
+        "temperature",
+        "temperature = 0.1\n",
+        "ECHOCHAIN_TEMPERATURE",
+        "0.2",
+        {"temperature": 0.4},
+        0.1,
+        0.2,
+        0.4,
+        TRANSFORM_TEMPERATURE,
+    ),
+    (
+        "judge_temperature",
+        "judge_temperature = 0.15\n",
+        "ECHOCHAIN_JUDGE_TEMPERATURE",
+        "0.25",
+        {"judge_temperature": 0.35},
+        0.15,
+        0.25,
+        0.35,
+        JUDGE_TEMPERATURE,
+    ),
+    (
+        "stop_score",
+        "stop_score = 3\n",
+        "ECHOCHAIN_STOP_SCORE",
+        "4",
+        {"stop_score": 5.0},
+        3.0,
+        4.0,
+        5.0,
+        STOP_SCORE,
+    ),
+    (
+        "deadline_seconds",
+        "deadline_seconds = 10\n",
+        "ECHOCHAIN_DEADLINE_SECONDS",
+        "20",
+        {"deadline_seconds": 30.0},
+        10.0,
+        20.0,
+        30.0,
+        CALL_DEADLINE_SECONDS,
+    ),
+    (
+        "budget",
+        "budget = 1.5\n",
+        "ECHOCHAIN_BUDGET",
+        "2.5",
+        {"budget": 3.5},
+        1.5,
+        2.5,
+        3.5,
+        None,
+    ),
+    (
+        "confirm_above_usd",
+        "confirm_above_usd = 1.5\n",
+        "ECHOCHAIN_CONFIRM_ABOVE",
+        "2.5",
+        {"confirm_above_usd": 3.5},
+        1.5,
+        2.5,
+        3.5,
+        CONFIRM_ABOVE_USD,
+    ),
+    (
+        "base_url",
+        'base_url = "https://file.example/v1"\n',
+        "OPENROUTER_API_BASE",
+        "https://env.example/v1",
+        {"base_url": "https://flag.example/v1"},
+        "https://file.example/v1",
+        "https://env.example/v1",
+        "https://flag.example/v1",
+        OPENROUTER_API_BASE,
+    ),
+    (
+        "http_referer",
+        'http_referer = "https://file.example"\n',
+        "ECHOCHAIN_HTTP_REFERER",
+        "https://env.example",
+        {"http_referer": "https://flag.example"},
+        "https://file.example",
+        "https://env.example",
+        "https://flag.example",
+        OPENROUTER_HEADERS["HTTP-Referer"],
+    ),
+    (
+        "title",
+        'title = "File"\n',
+        "ECHOCHAIN_TITLE",
+        "Env",
+        {"title": "Flag"},
+        "File",
+        "Env",
+        "Flag",
+        OPENROUTER_HEADERS["X-Title"],
+    ),
+    (
+        "rubric_version",
+        'rubric_version = "file"\n',
+        "ECHOCHAIN_RUBRIC_VERSION",
+        "env",
+        {"rubric_version": "flag"},
+        "file",
+        "env",
+        "flag",
+        "1",
+    ),
+    (
+        "models",
+        'models = ["file-model"]\n',
+        "ECHOCHAIN_MODELS",
+        "env-model",
+        {"models": ["flag-model"]},
+        ("file-model",),
+        ("env-model",),
+        ("flag-model",),
+        tuple(ROTATING_MODELS),
+    ),
+    (
+        "judge",
+        'judge = "file-judge"\n',
+        "ECHOCHAIN_JUDGE",
+        "env-judge",
+        {"judge": ["flag-judge"]},
+        ("file-judge",),
+        ("env-judge",),
+        ("flag-judge",),
+        (JUDGE_MODEL,),
+    ),
+    (
+        "condition",
+        'condition = ["swap"]\n',
+        "ECHOCHAIN_CONDITION",
+        "identity",
+        {"condition": ["paraphrase"]},
+        ("swap",),
+        ("identity",),
+        ("paraphrase",),
+        ("alternate",),
+    ),
+    (
+        "required_parameters",
+        'required_parameters = ["temperature"]\n',
+        "ECHOCHAIN_REQUIRED_PARAMETERS",
+        "seed",
+        {"required_parameters": ["response_format"]},
+        ("temperature",),
+        ("seed",),
+        ("response_format",),
+        tuple(REQUIRED_PARAMETERS),
+    ),
+    (
+        "out",
+        'out = "from-file"\n',
+        "ECHOCHAIN_OUT",
+        "from-env",
+        {"out": Path("from-flag")},
+        ("path", "from-file"),
+        Path("from-env"),
+        Path("from-flag"),
+        Path("runs"),
+    ),
+    (
+        "seeds",
+        'seeds = "from-file"\n',
+        "ECHOCHAIN_SEEDS",
+        "from-env",
+        {"seeds": Path("from-flag")},
+        ("path", "from-file"),
+        Path("from-env"),
+        Path("from-flag"),
+        None,
+    ),
+    (
+        "seed",
+        'seed = "file-seed"\n',
+        "ECHOCHAIN_SEED",
+        "env-seed",
+        {"seed": "flag-seed"},
+        "file-seed",
+        "env-seed",
+        "flag-seed",
+        None,
+    ),
+    (
+        "split",
+        'split = "held-out"\n',
+        "ECHOCHAIN_SPLIT",
+        "study",
+        {"split": "held-out"},
+        "held-out",
+        "study",
+        "held-out",
+        None,
+    ),
+    (
+        "start",
+        'start = "from-file"\n',
+        "ECHOCHAIN_START",
+        "from-env",
+        {"start": "from-flag"},
+        "from-file",
+        "from-env",
+        "from-flag",
+        None,
+    ),
+    (
+        "providers",
+        '[providers."example/model"]\norder = ["alpha"]\nallow_fallbacks = false\n',
+        "ECHOCHAIN_PROVIDERS",
+        "example/model=beta|true",
+        {"providers": "example/model=gamma|false"},
+        (("example/model", _PIN(("alpha",), False)),),
+        (("example/model", _PIN(("beta",), True)),),
+        (("example/model", _PIN(("gamma",), False)),),
+        (),
+    ),
+)
+
+
+@pytest.mark.parametrize("case", _PRECEDENCE)
+def test_setting_precedence(
+    case: tuple[object, ...],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (
+        key,
+        text,
+        env_name,
+        env_value,
+        override,
+        file_value,
+        env_expected,
+        flag_value,
+        default,
+    ) = case
+    if not isinstance(key, str) or not isinstance(text, str):
+        raise TypeError("case key must be text")
+    if not isinstance(env_name, str) or not isinstance(env_value, str):
+        raise TypeError("case environment must be text")
+    if not isinstance(override, dict):
+        raise TypeError("case override must be a mapping")
+    monkeypatch.chdir(tmp_path)
+    path = tmp_path / "experiment.toml"
+    path.write_text(text, encoding="utf-8")
+    file_settings = resolve_settings(config=path, environ={})
+    env_settings = resolve_settings(config=path, environ={env_name: env_value})
+    flag_settings = resolve_settings(
+        config=path,
+        environ={env_name: env_value},
+        overrides=override,
+    )
+    bare = resolve_settings(environ={})
+    assert getattr(file_settings, key) == _located(file_value, tmp_path)
+    assert getattr(env_settings, key) == _located(env_expected, tmp_path)
+    assert getattr(flag_settings, key) == _located(flag_value, tmp_path)
+    assert getattr(bare, key) == default
+
+
+@pytest.mark.parametrize(
+    ("text", "needle"),
+    [
+        ("surprise = 1\n", "unknown key surprise"),
+        ("max_cycles = true\n", "max_cycles must be an integer"),
+        ("models = []\n", "models must list at least one model"),
+    ],
+)
+def test_invalid_config_exits_2(
+    text: str,
+    needle: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "echochain.toml").write_text(text, encoding="utf-8")
+    assert main(["config", "show"]) == _EXIT_CONFIG
+    assert needle in capsys.readouterr().err
+
+
+def test_config_show_hides_the_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    sentinel = "sk-test-sentinel-value"
+    monkeypatch.setenv("OPENROUTER_API_KEY", sentinel)
+    monkeypatch.setenv("ECHOCHAIN_HTTP_REFERER", sentinel)
+    assert main(["config", "show"]) == 0
+    captured = capsys.readouterr()
+    assert sentinel not in captured.out
+    assert sentinel not in captured.err
+    assert REDACTED in captured.out
+    assert "api_key" not in captured.out
+
+
+def test_subcommands_use_the_fake_client(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    out = tmp_path / "out"
+    _install_client(monkeypatch, tmp_path, _Scripted())
+    assert (
+        main(
+            [
+                "run",
+                "--start",
+                _SEED,
+                "--condition",
+                "identity",
+                "--max-cycles",
+                "1",
+                "--out",
+                str(out),
+                "--verbose",
+            ]
+        )
+        == 0
+    )
+    captured = capsys.readouterr()
+    assert "step 1/1 identity" in captured.err
+    assert "prompt_tokens=" in captured.err
+    assert "max_cycles" in captured.out
+    run = next(path for path in out.iterdir() if path.is_dir())
+    assert main(["export", str(run)]) == 0
+    assert "identity" in capsys.readouterr().out
+    assert main(["analyze", str(run)]) == 0
+    assert "identity\t1\t1\t8.000000" in capsys.readouterr().out
+    assert main(["models"]) == 0
+    listed = capsys.readouterr().out
+    assert JUDGE_MODEL in listed
+    assert ROTATING_MODELS[0] in listed
+    assert main(["config", "show"]) == 0
+    assert '"max_cycles"' in capsys.readouterr().out
+
+
+def test_batch_runs_the_product(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    corpus = tmp_path / "seeds.toml"
+    corpus.write_text(
+        "\n".join(
+            [
+                'version = "v1"',
+                "[[seed]]",
+                'id = "one"',
+                'domain = "databases"',
+                'split = "study"',
+                'text = "first seed"',
+                "[[seed]]",
+                'id = "two"',
+                'domain = "databases"',
+                'split = "study"',
+                'text = "second seed"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    out = tmp_path / "out"
+    _install_client(monkeypatch, tmp_path, _Scripted())
+    assert (
+        main(
+            [
+                "--seeds",
+                str(corpus),
+                "--split",
+                "study",
+                "--condition",
+                "alternate",
+                "--condition",
+                "identity",
+                "--repeats",
+                "2",
+                "--max-cycles",
+                "1",
+                "--out",
+                str(out),
+                "--quiet",
+            ]
+        )
+        == 0
+    )
+    expected_runs = 2 * 2 * 2
+    assert len([path for path in out.iterdir() if path.is_dir()]) == expected_runs
+
+
+def test_generation_failure_exits_1(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class _Broken:
+        def __enter__(self) -> _Broken:
+            return self
+
+        def __exit__(
+            self,
+            exc_type: type[BaseException] | None,
+            exc_val: BaseException | None,
+            exc_tb: TracebackType | None,
+        ) -> None:
+            return None
+
+        def chat(
+            self,
+            model: str,
+            messages: Sequence[ChatMessage],
+            temperature: float,
+            *,
+            response_format: ResponseFormatJSONSchema | None = None,
+        ) -> Completion:
+            raise GenerationError((_completion("", model, temperature=temperature),))
+
+    out = tmp_path / "out"
+    _install_client(monkeypatch, tmp_path, _Broken())
+    assert (
+        main(["--start", _SEED, "--max-cycles", "1", "--quiet", "--out", str(out)]) == 1
+    )
+    assert "generation_error" in capsys.readouterr().err
+
+
+def test_judge_failure_exits_1(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    out = tmp_path / "out"
+    _install_client(monkeypatch, tmp_path, _Scripted(judge_text="not-json"))
+    assert (
+        main(["--start", _SEED, "--max-cycles", "1", "--quiet", "--out", str(out)]) == 1
+    )
+    assert "judge_error" in capsys.readouterr().err
+
+
+def test_threshold_exits_0(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    out = tmp_path / "out"
+    _install_client(
+        monkeypatch,
+        tmp_path,
+        _Scripted(judge_text='{"rationale": "low", "score": 1}'),
+    )
+    assert (
+        main(
+            [
+                "--start",
+                _SEED,
+                "--stop-consecutive",
+                "1",
+                "--quiet",
+                "--out",
+                str(out),
+            ]
+        )
+        == 0
+    )
+    assert "threshold" in capsys.readouterr().out
+
+
+def test_yes_required_when_the_estimate_is_high(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    out = tmp_path / "out"
+
+    def fetch(_api_key: str, **_kwargs: object) -> dict[str, ModelRecord]:
+        priced: dict[str, ModelRecord] = {}
+        for model_id, record in _catalog(_full_parameters()).items():
+            priced[model_id] = ModelRecord(
+                model_id=record.model_id,
+                parameters=record.parameters,
+                prompt_price=1.0,
+                completion_price=1.0,
+                request_price=0.0,
+            )
+        return priced
+
+    def forbid(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("paid client was constructed")
+
+    _install_client(monkeypatch, tmp_path, _Scripted())
+    monkeypatch.setattr("echochain.client.fetch_catalog", fetch)
+    monkeypatch.setattr("echochain.client.OpenRouterClient", forbid)
+    assert (
+        main(["--start", _SEED, "--max-cycles", "1", "--out", str(out)]) == _EXIT_CONFIG
+    )
+    assert "--yes" in capsys.readouterr().err
+    assert not out.exists()
+    monkeypatch.setattr(
+        "echochain.client.OpenRouterClient",
+        lambda *_args, **_kwargs: _Scripted(),
+    )
+    assert (
+        main(
+            [
+                "--yes",
+                "--start",
+                _SEED,
+                "--max-cycles",
+                "1",
+                "--quiet",
+                "--out",
+                str(out),
+            ]
+        )
+        == 0
+    )

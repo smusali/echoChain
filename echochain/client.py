@@ -24,13 +24,13 @@ from openai.types.shared_params.response_format_json_schema import (
 )
 
 from echochain.config import (
-    CALL_DEADLINE_SECONDS,
-    MAX_TOKENS,
-    OPENROUTER_API_BASE,
-    OPENROUTER_HEADERS,
     REQUIRED_PARAMETERS,
+    ProviderPin,
+    Settings,
+    default_settings,
     load_api_key,
     redact,
+    request_headers,
 )
 
 _CATALOG_TIMEOUT_SECONDS = 10.0
@@ -98,14 +98,17 @@ class ModelRecord:
     parameters: frozenset[str]
     prompt_price: float | None = None
     completion_price: float | None = None
+    request_price: float | None = None
 
 
-class _RequireParameters(TypedDict):
+class _ProviderBody(TypedDict, total=False):
     require_parameters: bool
+    order: list[str]
+    allow_fallbacks: bool
 
 
 class _ProviderExtra(TypedDict):
-    provider: _RequireParameters
+    provider: _ProviderBody
 
 
 class ModelCatalogError(RuntimeError):
@@ -186,7 +189,8 @@ class OpenRouterClient:
         api_key: str | None = None,
         *,
         transport: httpx2.BaseTransport | None = None,
-        deadline: float = CALL_DEADLINE_SECONDS,
+        deadline: float | None = None,
+        settings: Settings | None = None,
     ) -> None:
         """Store the key and the optional transport.
 
@@ -195,10 +199,20 @@ class OpenRouterClient:
                 client opens.
             transport: HTTP transport. When omitted, a pooled transport is used.
             deadline: Wall-clock seconds allowed for one call, including retries.
+                When omitted, the settings value is used.
+            settings: Base URL, headers, token cap, and provider pins. When
+                omitted, the module defaults are used.
         """
+        chosen = default_settings() if settings is None else settings
         self._api_key = api_key
         self._transport = transport
-        self._deadline_seconds = deadline
+        self._deadline_seconds = (
+            chosen.deadline_seconds if deadline is None else deadline
+        )
+        self._base_url = chosen.base_url
+        self._headers = request_headers(chosen)
+        self._max_tokens = chosen.max_tokens
+        self._pins = dict(chosen.providers)
         self._deadline_transport: _DeadlineTransport | None = None
         self._http: httpx2.Client | None = None
         self._sdk: OpenAI | None = None
@@ -217,8 +231,8 @@ class OpenRouterClient:
             self._api_key = key
             self._sdk = OpenAI(
                 api_key=key,
-                base_url=OPENROUTER_API_BASE,
-                default_headers=dict(OPENROUTER_HEADERS),
+                base_url=self._base_url,
+                default_headers=dict(self._headers),
                 max_retries=0,
                 http_client=self._http,
                 timeout=self._deadline_seconds,
@@ -313,10 +327,19 @@ class OpenRouterClient:
         response = _send(
             client,
             deadline,
-            _Outbound(model, messages, temperature, response_format),
+            _Outbound(
+                model,
+                messages,
+                temperature,
+                response_format,
+                self._max_tokens,
+                _provider_body(self._pins, model, response_format is not None),
+            ),
         )
         latency = time.perf_counter() - started
-        completion = _completion(response, model, temperature, latency)
+        completion = _completion(
+            response, model, temperature, latency, self._max_tokens
+        )
         return completion, _usable(completion, _refused(response))
 
 
@@ -363,25 +386,31 @@ def merge_attempts(attempts: Sequence[Completion]) -> Completion:
     )
 
 
-def check_models(catalog: Mapping[str, ModelRecord], model_ids: Sequence[str]) -> None:
+def check_models(
+    catalog: Mapping[str, ModelRecord],
+    model_ids: Sequence[str],
+    *,
+    required: Sequence[str] | None = None,
+) -> None:
     """Reject models that are missing or lack required parameters.
 
     Args:
         catalog: Models keyed by ID.
         model_ids: Configured model IDs.
+        required: Parameter names each model must advertise. When omitted, the
+            module defaults are used.
 
     Raises:
         ModelUnavailableError: An ID is missing or lacks a required parameter.
     """
+    names = REQUIRED_PARAMETERS if required is None else required
     for model_id in model_ids:
         record = catalog.get(model_id)
         if record is None:
             message = f"{model_id} is not in the OpenRouter catalog"
             raise ModelUnavailableError(message)
         missing = [
-            parameter
-            for parameter in REQUIRED_PARAMETERS
-            if parameter not in record.parameters
+            parameter for parameter in names if parameter not in record.parameters
         ]
         if missing:
             joined = ", ".join(missing)
@@ -416,15 +445,22 @@ def parse_catalog(payload: Mapping[str, object]) -> dict[str, ModelRecord]:
             parameters=parameters,
             prompt_price=_price(fields.get("pricing"), "prompt"),
             completion_price=_price(fields.get("pricing"), "completion"),
+            request_price=_price(fields.get("pricing"), "request"),
         )
     return records
 
 
-def fetch_catalog(api_key: str) -> dict[str, ModelRecord]:
+def fetch_catalog(
+    api_key: str,
+    *,
+    settings: Settings | None = None,
+) -> dict[str, ModelRecord]:
     """Download the OpenRouter model catalog.
 
     Args:
         api_key: OpenRouter API key.
+        settings: Base URL and headers. When omitted, the module defaults are
+            used.
 
     Returns:
         Models keyed by ID.
@@ -432,12 +468,13 @@ def fetch_catalog(api_key: str) -> dict[str, ModelRecord]:
     Raises:
         ModelCatalogError: The catalog request failed.
     """
+    chosen = default_settings() if settings is None else settings
     request = urllib.request.Request(
-        f"{OPENROUTER_API_BASE}/models",
+        f"{chosen.base_url.rstrip('/')}/models",
         headers={
             "Authorization": f"Bearer {api_key}",
             "Accept": "application/json",
-            **OPENROUTER_HEADERS,
+            **request_headers(chosen),
         },
     )
     try:
@@ -456,6 +493,25 @@ class _Outbound:
     messages: Sequence[ChatMessage]
     temperature: float
     response_format: ResponseFormatJSONSchema | None
+    max_tokens: int
+    extra: _ProviderExtra | None
+
+
+def _provider_body(
+    pins: Mapping[str, ProviderPin],
+    model: str,
+    structured: bool,
+) -> _ProviderExtra | None:
+    pin = pins.get(model)
+    if pin is None and not structured:
+        return None
+    body: _ProviderBody = {}
+    if structured:
+        body["require_parameters"] = True
+    if pin is not None:
+        body["order"] = list(pin.order)
+        body["allow_fallbacks"] = pin.allow_fallbacks
+    return {"provider": body}
 
 
 def _wait_limit(status: int) -> int | None:
@@ -475,10 +531,8 @@ def _pause_seconds(exc: APIStatusError) -> float:
 
 def _send(client: OpenAI, deadline: float, call: _Outbound) -> ChatCompletion:
     schema: ResponseFormatJSONSchema | Omit = omit
-    extra: _ProviderExtra | None = None
     if call.response_format is not None:
         schema = call.response_format
-        extra = {"provider": {"require_parameters": True}}
     for attempt in range(_MAX_ATTEMPTS):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -488,10 +542,10 @@ def _send(client: OpenAI, deadline: float, call: _Outbound) -> ChatCompletion:
                 model=call.model,
                 messages=_to_openai(call.messages),
                 temperature=call.temperature,
-                max_tokens=MAX_TOKENS,
+                max_tokens=call.max_tokens,
                 timeout=_timeout(remaining),
                 response_format=schema,
-                extra_body=extra,
+                extra_body=call.extra,
             )
         except CallDeadlineError:
             raise
@@ -559,6 +613,7 @@ def _completion(
     model: str,
     temperature: float,
     latency: float,
+    max_tokens: int,
 ) -> Completion:
     if not response.choices:
         text = ""
@@ -579,7 +634,7 @@ def _completion(
         usage=_usage(response.usage),
         latency_seconds=latency,
         temperature=temperature,
-        max_tokens=MAX_TOKENS,
+        max_tokens=max_tokens,
         sampling_seed=None,
     )
 

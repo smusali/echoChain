@@ -29,30 +29,47 @@ _JSON_FENCE = "```json"
 _FENCE = "```"
 _KEYS = frozenset({"rationale", "score"})
 
-_SCORE_SCHEMA: dict[str, object] = {
-    "type": "integer",
-    "minimum": SCORE_MIN,
-    "maximum": SCORE_MAX,
-}
-_PROPERTIES: dict[str, object] = {
-    "rationale": {"type": "string"},
-    "score": _SCORE_SCHEMA,
-}
+
+def judge_response_format(
+    score_min: int = SCORE_MIN,
+    score_max: int = SCORE_MAX,
+) -> ResponseFormatJSONSchema:
+    """Build the strict judge schema.
+
+    Args:
+        score_min: Lowest accepted score.
+        score_max: Highest accepted score.
+
+    Returns:
+        A JSON schema response format.
+    """
+    schema: dict[str, object] = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["rationale", "score"],
+        "properties": {
+            "rationale": {"type": "string"},
+            "score": {"type": "integer", "minimum": score_min, "maximum": score_max},
+        },
+    }
+    json_schema: JSONSchema = {
+        "name": "judge_score",
+        "strict": True,
+        "schema": schema,
+    }
+    return {"type": "json_schema", "json_schema": json_schema}
+
+
 JUDGE_SCHEMA: dict[str, object] = {
     "type": "object",
     "additionalProperties": False,
     "required": ["rationale", "score"],
-    "properties": _PROPERTIES,
+    "properties": {
+        "rationale": {"type": "string"},
+        "score": {"type": "integer", "minimum": SCORE_MIN, "maximum": SCORE_MAX},
+    },
 }
-_JSON_SCHEMA: JSONSchema = {
-    "name": "judge_score",
-    "strict": True,
-    "schema": JUDGE_SCHEMA,
-}
-JUDGE_RESPONSE_FORMAT: ResponseFormatJSONSchema = {
-    "type": "json_schema",
-    "json_schema": _JSON_SCHEMA,
-}
+JUDGE_RESPONSE_FORMAT = judge_response_format()
 
 
 @dataclass(frozen=True)
@@ -69,13 +86,22 @@ class Judgement:
     errors: int
 
 
+@dataclass(frozen=True)
+class JudgeCall:
+    kind: ScoreKind = "fidelity"
+    model: str = JUDGE_MODEL
+    samples: int = JUDGE_SAMPLES
+    temperature: float = JUDGE_TEMPERATURE
+    score_min: int = SCORE_MIN
+    score_max: int = SCORE_MAX
+
+
 def score(
     original: str,
     transformed: str,
     client: ChatClient,
     charge: Callable[[float], bool],
-    *,
-    kind: ScoreKind = "fidelity",
+    call: JudgeCall | None = None,
 ) -> Judgement:
     """Score one step.
 
@@ -85,14 +111,14 @@ def score(
         client: Chat client used for the judge model.
         charge: Records the cost of one judge call. Returns True when the
             budget is exhausted.
-        kind: `fidelity` compares two answers. `answerability` asks whether
-            the seed would answer the question.
+        call: Judge model, sample count, temperature, and score bounds.
 
     Returns:
         The mean of the valid scores, or None when every sample failed, plus
         the samples and the parse-error count.
     """
-    if kind == "answerability":
+    chosen = JudgeCall() if call is None else call
+    if chosen.kind == "answerability":
         content = ANSWERABILITY_USER_TMPL.render(question=transformed, seed=original)
     else:
         content = JUDGE_USER_TMPL.render(original=original, transformed=transformed)
@@ -100,53 +126,63 @@ def score(
         {"role": "system", "content": JUDGE_SYS},
         {"role": "user", "content": content},
     ]
-    samples: list[JudgeSample] = []
-    for _ in range(JUDGE_SAMPLES):
+    response_format = judge_response_format(chosen.score_min, chosen.score_max)
+    taken: list[JudgeSample] = []
+    for _ in range(chosen.samples):
         reply = client.chat(
-            JUDGE_MODEL,
+            chosen.model,
             messages,
-            temperature=JUDGE_TEMPERATURE,
-            response_format=JUDGE_RESPONSE_FORMAT,
+            temperature=chosen.temperature,
+            response_format=response_format,
         )
-        samples.append(_sample(reply))
+        taken.append(_sample(reply, chosen.score_min, chosen.score_max))
         if charge(reply.usage.cost):
             break
-    values = [sample.score for sample in samples if sample.score is not None]
-    errors = sum(1 for sample in samples if sample.error is not None)
+    values = [sample.score for sample in taken if sample.score is not None]
+    errors = sum(1 for sample in taken if sample.error is not None)
     mean = None if not values else statistics.mean(values)
-    return Judgement(mean=mean, samples=tuple(samples), errors=errors)
+    return Judgement(mean=mean, samples=tuple(taken), errors=errors)
 
 
-def parse_reply(reply: str) -> tuple[int | None, str | None]:
+def parse_reply(
+    reply: str,
+    *,
+    score_min: int = SCORE_MIN,
+    score_max: int = SCORE_MAX,
+) -> tuple[int | None, str | None]:
     """Parse a judge reply.
 
     Args:
         reply: Raw judge text.
+        score_min: Lowest accepted score.
+        score_max: Highest accepted score.
 
     Returns:
         The score and None, or None and a stable error code.
     """
     try:
-        return _parse_reply(reply)
+        return _parse_reply(reply, score_min, score_max)
     except Exception:
         return None, "invalid_json"
 
 
-def _sample(reply: Completion) -> JudgeSample:
-    value, error = parse_reply(reply.text)
+def _sample(reply: Completion, score_min: int, score_max: int) -> JudgeSample:
+    value, error = parse_reply(reply.text, score_min=score_min, score_max=score_max)
     if error is not None:
         logger.warning("Judge parse error: %s", error)
     return JudgeSample(score=value, error=error, completion=reply)
 
 
-def _parse_reply(reply: str) -> tuple[int | None, str | None]:
+def _parse_reply(
+    reply: str, score_min: int, score_max: int
+) -> tuple[int | None, str | None]:
     text = reply.strip()
     if text == "":
         return None, "empty"
     payload = _load_payload(text)
     if payload is None:
         return None, "invalid_json"
-    return _validate(payload)
+    return _validate(payload, score_min, score_max)
 
 
 def _load_payload(text: str) -> object | None:
@@ -172,14 +208,16 @@ def _candidates(text: str) -> tuple[str, ...]:
     return tuple(values)
 
 
-def _validate(payload: object) -> tuple[int | None, str | None]:
+def _validate(
+    payload: object, score_min: int, score_max: int
+) -> tuple[int | None, str | None]:
     fields = _fields(payload)
     if isinstance(fields, str):
         return None, fields
     score_value = fields["score"]
     if isinstance(score_value, bool) or not isinstance(score_value, int):
         return None, "not_integer"
-    if score_value < SCORE_MIN or score_value > SCORE_MAX:
+    if score_value < score_min or score_value > score_max:
         return None, "out_of_range"
     return score_value, None
 

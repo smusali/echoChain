@@ -1,0 +1,10 @@
+seeds = "../seeds/v1.toml"
+split = "study"
+condition = ["alternate", "swap", "same-model"]
+repeats = 3
+models = [
+  "google/gemini-3.8-flash",
+  "deepseek/deepseek-v4.1-flash-1017",
+  "mistralai/mistral-small-2603",
+]
+judge = "openai/gpt-4.1-mini"

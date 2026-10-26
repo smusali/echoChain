@@ -74,7 +74,7 @@ A scope is optional: `fix(package): make a fresh install work offline`.
 
 ## Add a model
 
-Edit `ROTATING_MODELS` in [`echochain/config.py`](echochain/config.py).
+Edit `ROTATING_MODELS` in [`echochain/config.py`](echochain/config.py). A config file or `--model` overrides that list for one run. The smoke command below is unchanged.
 
 Before a paid call, `check_models` in [`echochain/client.py`](echochain/client.py) requires every configured ID, including the judge, to be in the OpenRouter catalog and to advertise `response_format` and `seed`. Leave `JUDGE_MODEL` out of `ROTATING_MODELS`.
 

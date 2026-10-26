@@ -196,6 +196,15 @@ class ManifestDesign:
     corpus_version: str | None = None
     corpus_sha256: str | None = None
     stop_consecutive: int = STOP_CONSECUTIVE
+    max_cycles: int | None = None
+    max_tokens: int | None = None
+    stop_score: float | None = None
+    judge_models: tuple[str, ...] | None = None
+    judge_samples: int | None = None
+    judge_temperature: float | None = None
+    deadline_seconds: float | None = None
+    rubric_version: str | None = None
+    requested_models: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -271,6 +280,30 @@ def running_manifest(
     stop_name = _CONSECUTIVE_FIDELITY if chosen.stop_consecutive > 0 else _FIXED_LENGTH
     root = _project_root()
     git_sha, git_dirty = _git_state(root)
+    max_cycles = MAX_CYCLES if chosen.max_cycles is None else chosen.max_cycles
+    max_tokens = MAX_TOKENS if chosen.max_tokens is None else chosen.max_tokens
+    stop_score = STOP_SCORE if chosen.stop_score is None else chosen.stop_score
+    judge_models = (
+        (JUDGE_MODEL,) if chosen.judge_models is None else chosen.judge_models
+    )
+    judge_samples = (
+        JUDGE_SAMPLES if chosen.judge_samples is None else chosen.judge_samples
+    )
+    judge_temperature = (
+        JUDGE_TEMPERATURE
+        if chosen.judge_temperature is None
+        else chosen.judge_temperature
+    )
+    deadline = (
+        CALL_DEADLINE_SECONDS
+        if chosen.deadline_seconds is None
+        else chosen.deadline_seconds
+    )
+    rubric = RUBRIC_VERSION if chosen.rubric_version is None else chosen.rubric_version
+    if chosen.requested_models is None:
+        requested = list(configured_models())
+    else:
+        requested = list(chosen.requested_models)
     return {
         "status": "running",
         "run_id": run_id,
@@ -282,29 +315,31 @@ def running_manifest(
         "os": platform.platform(),
         "lock_sha256": _lock_hash(root),
         "prompt_sha256": prompt_hashes(),
-        "rubric_version": RUBRIC_VERSION,
+        "rubric_version": rubric,
         "seed_sha256": sha256_text(seed),
         "seed_id": chosen.seed_id,
         "corpus_version": chosen.corpus_version,
         "corpus_sha256": chosen.corpus_sha256,
         "condition": chosen.condition,
         "schedule": {"name": chosen.schedule_name, "models": models},
-        "requested_models": list(configured_models()),
+        "requested_models": requested,
         "served_models": [],
         "providers": [],
         "temperatures": {
             "transform": chosen.transform_temperature,
-            "judge": JUDGE_TEMPERATURE,
+            "judge": judge_temperature,
         },
         "sampling_seed": None,
-        "max_cycles": MAX_CYCLES,
-        "max_tokens": MAX_TOKENS,
+        "max_cycles": max_cycles,
+        "max_tokens": max_tokens,
         "stop_rule": {
             "name": stop_name,
-            "threshold": STOP_SCORE,
+            "threshold": stop_score,
             "consecutive": chosen.stop_consecutive,
         },
-        "judge_panel": [{"model": JUDGE_MODEL, "samples": JUDGE_SAMPLES}],
+        "judge_panel": [
+            {"model": model, "samples": judge_samples} for model in judge_models
+        ],
         "started_at": utc_now(),
         "ended_at": None,
         "prompt_tokens": 0,
@@ -313,7 +348,7 @@ def running_manifest(
         "errors": {"generation": 0, "judge": 0},
         "termination_reason": None,
         "budget": budget,
-        "deadline_seconds": CALL_DEADLINE_SECONDS,
+        "deadline_seconds": deadline,
     }
 
 
