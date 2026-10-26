@@ -3,9 +3,9 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import logging
 import statistics
 import sys
-import traceback
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -30,6 +30,7 @@ from echochain.design import (
     Seed,
     SeedRef,
     StepNote,
+    condition_table,
     default_spec,
     load_corpus,
     model_for,
@@ -44,8 +45,11 @@ from echochain.persistence import (
     EmptySeedError,
     ManifestDesign,
     Recorder,
+    ResumePlan,
+    RunDataError,
     TerminationReason,
     mk_exp_dir,
+    prepare_resume,
     running_manifest,
 )
 from echochain.prompts import (
@@ -64,6 +68,7 @@ _EPILOG = """\
 examples:
   echochain --start TEXT --out runs --budget 1
   echochain run --seeds seeds/v1.toml --split study
+  echochain run --resume RUN_ID
 
 exit codes:
   0    completed, the threshold or the cycle cap was reached
@@ -124,6 +129,7 @@ def main(argv: list[str] | None = None) -> int:
         failure. `2` is a usage or configuration error. `3` means the budget
         was exceeded. `130` means the run was interrupted.
     """
+    _configure_logging()
     raw = list(sys.argv[1:] if argv is None else argv)
     try:
         args = _parser().parse_args(_normalize(raw))
@@ -134,13 +140,17 @@ def main(argv: list[str] | None = None) -> int:
         DesignError,
         MissingAPIKeyError,
         ConfigError,
+        RunDataError,
         client_mod.ModelUnavailableError,
     ) as exc:
         return _fail(str(exc), _EXIT_CONFIG)
     except client_mod.ModelCatalogError as exc:
         return _fail(str(exc), 1)
+    except KeyboardInterrupt:
+        return _EXIT_INTERRUPTED
     except Exception:
-        return _fail(traceback.format_exc(), 1)
+        logging.getLogger("echochain").exception("run failed")
+        return 1
 
 
 def _dispatch(args: argparse.Namespace) -> int:
@@ -258,6 +268,10 @@ def _add_run_flags(run: argparse.ArgumentParser) -> None:
         action="append",
         help="Pin as model=provider,provider|true.",
     )
+    run.add_argument(
+        "--resume",
+        help="Continue a run id or directory from its last complete step.",
+    )
 
 
 def _normalize(argv: list[str]) -> list[str]:
@@ -337,10 +351,12 @@ def _overrides(args: argparse.Namespace) -> dict[str, object]:
 
 
 def _run(args: argparse.Namespace, settings: Settings) -> int:
+    progress = None if args.quiet else _on_step(verbose=args.verbose)
+    if args.resume:
+        return _resume(args, settings, progress)
     batch = _batch(settings)
     if args.dry_run:
         return _dry_run(batch, settings)
-    progress = None if args.quiet else _on_step(verbose=args.verbose)
     return _execute(batch, settings, yes=args.yes, progress=progress)
 
 
@@ -498,6 +514,111 @@ def _design(spec: RunSpec, settings: Settings) -> ManifestDesign:
         rubric_version=settings.rubric_version,
         requested_models=(*settings.models, *settings.judge),
     )
+
+
+def _resume(
+    args: argparse.Namespace,
+    settings: Settings,
+    progress: Callable[[StepNote], None] | None,
+) -> int:
+    if (
+        args.dry_run
+        or args.start is not None
+        or args.seed is not None
+        or args.split is not None
+    ):
+        raise UsageError("--resume cannot be combined with a new run")
+    directory = _find_run(str(args.resume), settings.out)
+    plan = prepare_resume(directory)
+    panel = plan.manifest["judge_panel"]
+    if not panel:
+        raise UsageError("run has no judge panel")
+    tuned = replace(
+        settings,
+        models=tuple(plan.manifest["schedule"]["models"]),
+        judge=tuple(member["model"] for member in panel),
+        max_tokens=plan.manifest["max_tokens"],
+        deadline_seconds=plan.manifest["deadline_seconds"],
+    )
+    api_key = load_api_key()
+    catalog = client_mod.fetch_catalog(api_key, settings=tuned)
+    client_mod.check_models(
+        catalog,
+        (*tuned.models, *tuned.judge),
+        required=tuned.required_parameters,
+    )
+    with Recorder(directory, plan.manifest, prior=plan.rows) as recorder:
+        with client_mod.OpenRouterClient(api_key, settings=tuned) as client:
+            try:
+                reason = cycle(
+                    plan.seed,
+                    recorder,
+                    client,
+                    run_id=plan.manifest["run_id"],
+                    spec=_resume_spec(plan, tuned, progress),
+                )
+            except KeyboardInterrupt:
+                recorder.finish("interrupted")
+                return _report(directory, "interrupted")
+        recorder.finish(reason)
+    return _report(directory, reason)
+
+
+def _resume_spec(
+    plan: ResumePlan,
+    settings: Settings,
+    progress: Callable[[StepNote], None] | None,
+) -> RunSpec:
+    manifest = plan.manifest
+    panel = manifest["judge_panel"]
+    models = tuple(manifest["schedule"]["models"])
+    condition = condition_table(
+        models, temperature=manifest["temperatures"]["transform"]
+    ).get(manifest["condition"])
+    if condition is None:
+        raise UsageError(f"unknown condition: {manifest['condition']}")
+    stop = manifest["stop_rule"]
+    return RunSpec(
+        condition=condition,
+        models=models,
+        max_cycles=manifest["max_cycles"],
+        stop_score=stop["threshold"],
+        stop_consecutive=stop["consecutive"],
+        seed_id=manifest["seed_id"],
+        corpus_version=manifest["corpus_version"],
+        corpus_sha256=manifest["corpus_sha256"],
+        budget=manifest["budget"],
+        judge_models=tuple(member["model"] for member in panel),
+        judge_samples=panel[0]["samples"],
+        judge_temperature=manifest["temperatures"]["judge"],
+        score_min=settings.score_min,
+        score_max=settings.score_max,
+        judge_error_numerator=settings.judge_error_numerator,
+        judge_error_denominator=settings.judge_error_denominator,
+        on_step=progress,
+        start_step=plan.next_step,
+        opening_text=plan.current,
+        spent=plan.spent,
+    )
+
+
+def _find_run(token: str, root: Path) -> Path:
+    if token.strip() == "":
+        raise UsageError("run was not found")
+    candidate = Path(token)
+    if (candidate / "manifest.json").is_file():
+        return candidate
+    if root.is_dir():
+        matches = [
+            path
+            for path in root.iterdir()
+            if path.is_dir()
+            and (path.name == token or path.name.endswith(f"_{token}"))
+            and (path / "manifest.json").is_file()
+        ]
+        if len(matches) == 1:
+            return matches[0]
+    raise UsageError(f"run {token} was not found")
 
 
 def _models(settings: Settings) -> int:
@@ -747,6 +868,25 @@ def _report(directory: Path, reason: TerminationReason) -> int:
     if reason == "interrupted":
         return _EXIT_INTERRUPTED
     return 1
+
+
+def _configure_logging() -> None:
+    logger = logging.getLogger("echochain")
+    if logger.handlers:
+        return
+    handler = _StderrHandler()
+    handler.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+
+
+class _StderrHandler(logging.Handler):
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            sys.stderr.write(self.format(record) + "\n")
+            sys.stderr.flush()
+        except Exception:
+            self.handleError(record)
 
 
 def _fail(message: str, code: int) -> int:

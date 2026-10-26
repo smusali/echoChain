@@ -96,7 +96,8 @@ def cycle(
         client: Chat client used for transformations and judging.
         run_id: Run UUID stored on every row.
         spec: Condition, schedule, budget, and stop rule. Defaults to a
-            fixed-length alternating run.
+            fixed-length alternating run. `start_step` and `opening_text`
+            continue a chain that already has stored steps.
 
     Returns:
         Why the run stopped.
@@ -105,15 +106,15 @@ def cycle(
     state = _Run(
         plan=plan,
         client=client,
-        spending=_Spending(plan.budget),
+        spending=_Spending(plan.budget, plan.spent),
         seed=seed,
         recorder=recorder,
         run_id=run_id,
-        current=seed,
+        current=seed if plan.opening_text is None else plan.opening_text,
     )
     if state.spending.blocked():
         return "budget_exceeded"
-    for index in range(1, plan.max_cycles + 1):
+    for index in range(plan.start_step, plan.max_cycles + 1):
         reason = _turn(state, index)
         if reason is not None:
             return reason

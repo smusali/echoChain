@@ -13,6 +13,10 @@ Next release is `0.2.0`, tracked in [Upgrade to v0.2.0](https://github.com/smusa
 
 ### Added
 
+- `echochain run --resume` continues an interrupted, failed, or unfinished run from its last complete step.
+- Provider pins accept `data_collection` and `zdr`.
+- CI enforces 80% coverage and runs `pip-audit`. Dependabot watches the lock file and GitHub Actions.
+- `SECURITY.md` describes how to report a vulnerability privately.
 - An experiment TOML file, with CLI flags overriding environment variables, then the file, then the built-in defaults. `echochain config show` prints the resolved settings and redacts the API key.
 - `run`, `config show`, `models`, `export`, and `analyze`. `echochain --start` is still `echochain run --start`.
 - `--dry-run` prints a token ceiling and a cost ceiling from the OpenRouter model list. A priced estimate above `confirm_above_usd` (default `$1`) waits for `--yes`.
@@ -26,6 +30,9 @@ Next release is `0.2.0`, tracked in [Upgrade to v0.2.0](https://github.com/smusa
 
 ### Changed
 
+- Every chat call asks OpenRouter to require the requested parameters and not to fall back to another provider.
+- The manifest lists the provider that served each model. A catchable crash records `failed` and an error summary.
+- Development installs use pytest 9.0.3 or newer.
 - Chat calls share one client, retry only transient failures, and stop at a wall-clock deadline.
 - Completions record tokens, cost, and finish reason. Empty or truncated replies are tried once more.
 - Answer steps are scored for fidelity. Question steps are scored for answerability. Stop rules and plots read fidelity only.
@@ -37,6 +44,7 @@ Next release is `0.2.0`, tracked in [Upgrade to v0.2.0](https://github.com/smusa
 
 ### Removed
 
+- Runs no longer write `chain.csv`. `echochain export --format csv` prints those columns.
 - The `backoff` dependency.
 
 ## [0.1.0] - 2026-10-25

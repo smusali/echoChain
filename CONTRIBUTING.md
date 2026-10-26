@@ -53,6 +53,8 @@ uv run pytest
 uv run pre-commit run --all-files
 ```
 
+`uv run pytest` measures coverage of the `echochain` package and fails if coverage drops below 80%. A run writes `manifest.json` and `chain.jsonl`. It does not write CSV. `echochain export --format csv RUN` prints the short table from the JSONL.
+
 With pip, after activating the virtual environment:
 
 ```bash
@@ -98,6 +100,10 @@ echochain --start "Redis uses single-threaded event loops with epoll for I/O mul
 ```
 
 You can also put the key in `.env`. Copy [`.env.example`](.env.example) and fill in `OPENROUTER_API_KEY`. The process never accepts the key as an argument.
+
+## Dependencies
+
+Dependabot opens weekly pull requests for the locked Python dependencies and for GitHub Actions. CI runs `pip-audit` against that lock file. The check fails when a pinned dependency has a known advisory.
 
 ## Report an issue
 

@@ -37,10 +37,11 @@
     "errors",
     "termination_reason",
     "budget",
-    "deadline_seconds"
+    "deadline_seconds",
+    "error"
   ],
   "properties": {
-    "status": {"enum": ["running", "finished"]},
+    "status": {"enum": ["running", "finished", "failed"]},
     "run_id": {"type": "string", "format": "uuid"},
     "slug": {"type": "string"},
     "version": {"type": "string"},
@@ -98,7 +99,18 @@
     },
     "requested_models": {"type": "array", "items": {"type": "string"}},
     "served_models": {"type": "array", "items": {"type": "string"}},
-    "providers": {"type": "array", "items": {"type": "string"}},
+    "providers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["model", "provider"],
+        "properties": {
+          "model": {"type": "string"},
+          "provider": {"type": "string"}
+        }
+      }
+    },
     "temperatures": {
       "type": "object",
       "additionalProperties": false,
@@ -169,6 +181,7 @@
         {"type": "null"}
       ]
     },
-    "deadline_seconds": {"type": "number", "minimum": 0}
+    "deadline_seconds": {"type": "number", "minimum": 0},
+    "error": {"type": ["string", "null"]}
   }
 }

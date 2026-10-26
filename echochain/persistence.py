@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-import csv
 import hashlib
 import json
 import os
 import platform
-import statistics
 import subprocess
 import uuid
+from collections.abc import Mapping, Sequence
+from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -40,12 +40,29 @@ from echochain.prompts import (
     RUBRIC_VERSION,
 )
 
-_FIELDNAMES = ("cycle", "phase", "model", "served_model", "text", "score")
 _SLUG_WORDS = 3
 _DEFAULT_CONDITION = "alternate"
 _FIXED_LENGTH = "fixed_length"
 _CONSECUTIVE_FIDELITY = "consecutive_fidelity"
 _GIT_TIMEOUT_SECONDS = 5
+_COMPLETE = frozenset(
+    {
+        "threshold",
+        "max_cycles",
+        "generation_error",
+        "judge_error",
+        "budget_exceeded",
+    }
+)
+_PROMPT_KEYS = (
+    "a2q",
+    "q2a",
+    "judge_system",
+    "judge_user",
+    "answerability",
+    "identity",
+    "paraphrase",
+)
 
 TerminationReason = Literal[
     "threshold",
@@ -58,6 +75,10 @@ TerminationReason = Literal[
 
 
 class EmptySeedError(RuntimeError):
+    pass
+
+
+class RunDataError(RuntimeError):
     pass
 
 
@@ -148,6 +169,11 @@ class ErrorCounts(TypedDict):
     judge: int
 
 
+class ModelProvider(TypedDict):
+    model: str
+    provider: str
+
+
 class Manifest(TypedDict):
     status: str
     run_id: str
@@ -168,7 +194,7 @@ class Manifest(TypedDict):
     schedule: ScheduleRecord
     requested_models: list[str]
     served_models: list[str]
-    providers: list[str]
+    providers: list[ModelProvider]
     temperatures: Temperatures
     sampling_seed: None
     max_cycles: int
@@ -184,6 +210,7 @@ class Manifest(TypedDict):
     termination_reason: TerminationReason | None
     budget: float | None
     deadline_seconds: float
+    error: str | None
 
 
 @dataclass(frozen=True)
@@ -349,6 +376,7 @@ def running_manifest(
         "termination_reason": None,
         "budget": budget,
         "deadline_seconds": deadline,
+        "error": None,
     }
 
 
@@ -381,13 +409,72 @@ def mk_exp_dir(seed: str, root: Path) -> RunDirectory:
     return RunDirectory(directory=path, run_id=run_id, slug=_slug(seed))
 
 
+@dataclass(frozen=True)
+class ResumePlan:
+    manifest: Manifest
+    seed: str
+    current: str
+    next_step: int
+    spent: float
+    rows: tuple[Mapping[str, object], ...]
+
+
+def prepare_resume(directory: Path) -> ResumePlan:
+    """Load a run that can continue from its last complete step.
+
+    Args:
+        directory: Run directory containing the manifest and the JSONL chain.
+
+    Returns:
+        The manifest, the seed, the text to continue from, and the next step.
+    """
+    manifest_path = directory / "manifest.json"
+    if not manifest_path.is_file():
+        raise RunDataError("manifest.json was not found")
+    chain = directory / "chain.jsonl"
+    _clip_partial(chain)
+    manifest = _load_manifest(manifest_path)
+    reason = manifest["termination_reason"]
+    if reason in _COMPLETE or (
+        manifest["status"] == "finished" and reason != "interrupted"
+    ):
+        raise RunDataError("run is already finished")
+    rows = tuple(_read_chain(chain))
+    if not rows:
+        raise RunDataError("run has no completed step")
+    _require_steps(rows)
+    seed = _text(rows[0], "input_text", "recorded input is missing")
+    if sha256_text(seed) != manifest["seed_sha256"]:
+        raise RunDataError("recorded input does not match the seed hash")
+    current = _text(rows[-1], "output_text", "recorded output is missing")
+    manifest["status"] = "running"
+    manifest["ended_at"] = None
+    manifest["error"] = None
+    manifest["termination_reason"] = None
+    return ResumePlan(
+        manifest=manifest,
+        seed=seed,
+        current=current,
+        next_step=len(rows) + 1,
+        spent=_spent(rows),
+        rows=rows,
+    )
+
+
 class Recorder:
-    def __init__(self, directory: Path, manifest: Manifest) -> None:
-        """Open the run files and write the starting manifest.
+    def __init__(
+        self,
+        directory: Path,
+        manifest: Manifest,
+        *,
+        prior: Sequence[Mapping[str, object]] | None = None,
+    ) -> None:
+        """Open the chain and write the starting manifest.
 
         Args:
             directory: Run directory.
             manifest: Manifest with status running.
+            prior: Steps already stored. When set, new steps are appended.
         """
         self.generation_errors = 0
         self.judge_errors = 0
@@ -395,20 +482,23 @@ class Recorder:
         self._completion_tokens = 0
         self._cost = 0.0
         self._served_models: list[str] = []
-        self._providers: list[str] = []
+        self._providers: list[ModelProvider] = []
         self._directory = directory
         self._manifest = manifest
-        _atomic_json(directory / "manifest.json", manifest)
-        self.csv = (directory / "chain.csv").open("w", newline="", encoding="utf-8")
+        self._stack = ExitStack()
+        mode = "a" if prior is not None else "w"
         try:
-            self.jl = (directory / "chain.jsonl").open(
-                "w", encoding="utf-8", newline=""
+            self.jl = self._stack.enter_context(
+                (directory / "chain.jsonl").open(mode, encoding="utf-8", newline="")
             )
+            if prior is not None:
+                self.generation_errors = manifest["errors"]["generation"]
+                self.judge_errors = _judge_errors(prior)
+                self._restore(prior)
+            _atomic_json(directory / "manifest.json", manifest)
         except Exception:
-            self.csv.close()
+            self._stack.close()
             raise
-        self._writer = csv.DictWriter(self.csv, fieldnames=list(_FIELDNAMES))
-        self._writer.writeheader()
 
     def __enter__(self) -> Recorder:
         return self
@@ -419,8 +509,14 @@ class Recorder:
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> None:
-        self.csv.close()
-        self.jl.close()
+        try:
+            if exc_type is not None and self._manifest["status"] == "running":
+                if issubclass(exc_type, KeyboardInterrupt):
+                    self.finish("interrupted")
+                elif exc_val is not None:
+                    self.fail(exc_val)
+        finally:
+            self._stack.close()
 
     def log(self, record: StepRecord) -> None:
         """Append one step.
@@ -429,21 +525,38 @@ class Recorder:
             record: Step fields to store. Text fields are redacted.
         """
         row = _redact_row(record)
-        self._writer.writerow(
-            {
-                "cycle": row["step"],
-                "phase": row["phase"],
-                "model": row["requested_model"],
-                "served_model": row["served_model"],
-                "text": row["output_text"],
-                "score": _csv_score(row),
-            }
-        )
-        self.csv.flush()
         self._note(row)
         self.jl.write(json.dumps(row, ensure_ascii=False) + "\n")
         self.jl.flush()
         os.fsync(self.jl.fileno())
+
+    def _restore(self, rows: Sequence[Mapping[str, object]]) -> None:
+        for row in rows:
+            self._track(
+                (
+                    _count(row.get("prompt_tokens")),
+                    _count(row.get("completion_tokens")),
+                    _amount(row.get("cost")),
+                ),
+                (
+                    _string(row.get("served_model"), "served_model"),
+                    _string(row.get("requested_model"), "requested_model"),
+                    _provider_name(row),
+                ),
+            )
+            for sample in _sample_maps(row.get("judge")):
+                self._track(
+                    (
+                        _count(sample.get("prompt_tokens")),
+                        _count(sample.get("completion_tokens")),
+                        _amount(sample.get("cost")),
+                    ),
+                    (
+                        _string(sample.get("served_model"), "served_model"),
+                        _string(sample.get("requested_model"), "requested_model"),
+                        _provider_name(sample),
+                    ),
+                )
 
     def finish(self, reason: TerminationReason) -> None:
         """Write the final manifest.
@@ -454,6 +567,21 @@ class Recorder:
         self._manifest["status"] = "finished"
         self._manifest["ended_at"] = utc_now()
         self._manifest["termination_reason"] = reason
+        self._manifest["error"] = None
+        self._commit()
+
+    def fail(self, exc: BaseException) -> None:
+        """Write a failed manifest.
+
+        Args:
+            exc: Exception that stopped the run.
+        """
+        self._manifest["status"] = "failed"
+        self._manifest["ended_at"] = utc_now()
+        self._manifest["error"] = redact(f"{type(exc).__name__}: {exc}")
+        self._commit()
+
+    def _commit(self) -> None:
         self._manifest["prompt_tokens"] = self._prompt_tokens
         self._manifest["completion_tokens"] = self._completion_tokens
         self._manifest["cost"] = self._cost
@@ -466,21 +594,34 @@ class Recorder:
         _atomic_json(self._directory / "manifest.json", self._manifest)
 
     def _note(self, row: StepRecord) -> None:
-        self._add(row["prompt_tokens"], row["completion_tokens"], row["cost"])
-        _remember(self._served_models, row["served_model"])
-        provider = row["provider"]
-        if provider is not None:
-            _remember(self._providers, provider)
+        self._track(
+            (row["prompt_tokens"], row["completion_tokens"], row["cost"]),
+            (row["served_model"], row["requested_model"], row["provider"]),
+        )
         for sample in row["judge"]["samples"]:
-            self._add(
-                sample["prompt_tokens"],
-                sample["completion_tokens"],
-                sample["cost"],
+            self._track(
+                (
+                    sample["prompt_tokens"],
+                    sample["completion_tokens"],
+                    sample["cost"],
+                ),
+                (
+                    sample["served_model"],
+                    sample["requested_model"],
+                    sample["provider"],
+                ),
             )
-            _remember(self._served_models, sample["served_model"])
-            sample_provider = sample["provider"]
-            if sample_provider is not None:
-                _remember(self._providers, sample_provider)
+
+    def _track(
+        self,
+        usage: tuple[int, int, float],
+        call: tuple[str, str, str | None],
+    ) -> None:
+        prompt_tokens, completion_tokens, cost = usage
+        served, model, provider = call
+        self._add(prompt_tokens, completion_tokens, cost)
+        _remember(self._served_models, served)
+        _remember_provider(self._providers, model, provider)
 
     def _add(self, prompt_tokens: int, completion_tokens: int, cost: float) -> None:
         self._prompt_tokens += prompt_tokens
@@ -564,20 +705,287 @@ def _redact_optional(value: str | None) -> str | None:
     return redact(value)
 
 
-def _csv_score(row: StepRecord) -> str:
-    scores = [
-        sample["score"]
-        for sample in row["judge"]["samples"]
-        if sample["score"] is not None
-    ]
-    if not scores:
-        return ""
-    return str(statistics.mean(scores))
-
-
 def _remember(items: list[str], value: str) -> None:
     if value != "" and value not in items:
         items.append(value)
+
+
+def _remember_provider(
+    items: list[ModelProvider], model: str, provider: str | None
+) -> None:
+    if provider is None or provider == "":
+        return
+    pair: ModelProvider = {"model": model, "provider": provider}
+    if pair not in items:
+        items.append(pair)
+
+
+def _clip_partial(path: Path) -> None:
+    if not path.is_file():
+        return
+    data = path.read_bytes()
+    if data == b"" or data.endswith(b"\n"):
+        return
+    newline = data.rfind(b"\n")
+    kept = b"" if newline < 0 else data[: newline + 1]
+    path.write_bytes(kept)
+
+
+def _read_chain(path: Path) -> list[dict[str, object]]:
+    if not path.is_file():
+        return []
+    rows: list[dict[str, object]] = []
+    for line_number, line in enumerate(
+        path.read_text(encoding="utf-8").splitlines(), start=1
+    ):
+        if line.strip() == "":
+            continue
+        try:
+            parsed: object = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise RunDataError(f"chain.jsonl:{line_number} is not JSON") from exc
+        rows.append(_mapping(parsed, f"chain.jsonl:{line_number}"))
+    return rows
+
+
+def _require_steps(rows: Sequence[Mapping[str, object]]) -> None:
+    for index, row in enumerate(rows, start=1):
+        step = row.get("step")
+        if isinstance(step, bool) or step != index:
+            raise RunDataError("chain is missing a step")
+
+
+def _text(row: Mapping[str, object], key: str, message: str) -> str:
+    value = row.get(key)
+    if not isinstance(value, str):
+        raise RunDataError(message)
+    return value
+
+
+def _sample_maps(judge: object) -> list[Mapping[str, object]]:
+    if not isinstance(judge, dict):
+        return []
+    samples = judge.get("samples")
+    if not isinstance(samples, list):
+        return []
+    return [sample for sample in samples if isinstance(sample, dict)]
+
+
+def _spent(rows: Sequence[Mapping[str, object]]) -> float:
+    total = 0.0
+    for row in rows:
+        total += _amount(row.get("cost"))
+        for sample in _sample_maps(row.get("judge")):
+            total += _amount(sample.get("cost"))
+    return total
+
+
+def _judge_errors(rows: Sequence[Mapping[str, object]]) -> int:
+    total = 0
+    for row in rows:
+        judge = row.get("judge")
+        if not isinstance(judge, dict):
+            continue
+        total += _count(judge.get("errors"))
+    return total
+
+
+def _provider_name(row: Mapping[str, object]) -> str | None:
+    provider = row.get("provider")
+    if isinstance(provider, str):
+        return provider
+    return None
+
+
+def _count(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise RunDataError("token count must be an integer")
+    return value
+
+
+def _amount(value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise RunDataError("value must be a number")
+    return float(value)
+
+
+def _load_manifest(path: Path) -> Manifest:
+    try:
+        parsed: object = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise RunDataError("manifest.json is not JSON") from exc
+    raw = _mapping(parsed, "manifest")
+    return _manifest(raw)
+
+
+def _manifest(raw: Mapping[str, object]) -> Manifest:
+    if raw.get("sampling_seed") is not None:
+        raise RunDataError("sampling_seed must be null")
+    schedule = _mapping(raw.get("schedule"), "schedule")
+    temperatures = _mapping(raw.get("temperatures"), "temperatures")
+    stop = _mapping(raw.get("stop_rule"), "stop_rule")
+    errors = _mapping(raw.get("errors"), "errors")
+    return {
+        "status": _string(raw.get("status"), "status"),
+        "run_id": _string(raw.get("run_id"), "run_id"),
+        "slug": _string(raw.get("slug"), "slug"),
+        "version": _string(raw.get("version"), "version"),
+        "git_sha": _optional_string(raw.get("git_sha"), "git_sha"),
+        "git_dirty": _optional_bool(raw.get("git_dirty"), "git_dirty"),
+        "python": _string(raw.get("python"), "python"),
+        "os": _string(raw.get("os"), "os"),
+        "lock_sha256": _optional_string(raw.get("lock_sha256"), "lock_sha256"),
+        "prompt_sha256": _prompt_hashes(raw.get("prompt_sha256")),
+        "rubric_version": _string(raw.get("rubric_version"), "rubric_version"),
+        "seed_sha256": _string(raw.get("seed_sha256"), "seed_sha256"),
+        "seed_id": _optional_string(raw.get("seed_id"), "seed_id"),
+        "corpus_version": _optional_string(raw.get("corpus_version"), "corpus_version"),
+        "corpus_sha256": _optional_string(raw.get("corpus_sha256"), "corpus_sha256"),
+        "condition": _string(raw.get("condition"), "condition"),
+        "schedule": {
+            "name": _string(schedule.get("name"), "schedule name"),
+            "models": _string_list(schedule.get("models"), "schedule models"),
+        },
+        "requested_models": _string_list(
+            raw.get("requested_models"), "requested_models"
+        ),
+        "served_models": _string_list(raw.get("served_models"), "served_models"),
+        "providers": _providers(raw.get("providers")),
+        "temperatures": {
+            "transform": _amount(temperatures.get("transform")),
+            "judge": _amount(temperatures.get("judge")),
+        },
+        "sampling_seed": None,
+        "max_cycles": _count(raw.get("max_cycles")),
+        "max_tokens": _count(raw.get("max_tokens")),
+        "stop_rule": {
+            "name": _string(stop.get("name"), "stop rule"),
+            "threshold": _amount(stop.get("threshold")),
+            "consecutive": _count(stop.get("consecutive")),
+        },
+        "judge_panel": _panel(raw.get("judge_panel")),
+        "started_at": _string(raw.get("started_at"), "started_at"),
+        "ended_at": _optional_string(raw.get("ended_at"), "ended_at"),
+        "prompt_tokens": _count(raw.get("prompt_tokens")),
+        "completion_tokens": _count(raw.get("completion_tokens")),
+        "cost": _amount(raw.get("cost")),
+        "errors": {
+            "generation": _count(errors.get("generation")),
+            "judge": _count(errors.get("judge")),
+        },
+        "termination_reason": _termination(raw.get("termination_reason")),
+        "budget": _optional_amount(raw.get("budget")),
+        "deadline_seconds": _amount(raw.get("deadline_seconds")),
+        "error": _optional_string(raw.get("error"), "error"),
+    }
+
+
+def _prompt_hashes(value: object) -> PromptHashes:
+    raw = _mapping(value, "prompt_sha256")
+    hashes = {key: _string(raw.get(key), key) for key in _PROMPT_KEYS}
+    return {
+        "a2q": hashes["a2q"],
+        "q2a": hashes["q2a"],
+        "judge_system": hashes["judge_system"],
+        "judge_user": hashes["judge_user"],
+        "answerability": hashes["answerability"],
+        "identity": hashes["identity"],
+        "paraphrase": hashes["paraphrase"],
+    }
+
+
+def _providers(value: object) -> list[ModelProvider]:
+    if not isinstance(value, list):
+        raise RunDataError("providers must be a list")
+    pairs: list[ModelProvider] = []
+    for item in value:
+        raw = _mapping(item, "provider")
+        pairs.append(
+            {
+                "model": _string(raw.get("model"), "provider model"),
+                "provider": _string(raw.get("provider"), "provider name"),
+            }
+        )
+    return pairs
+
+
+def _panel(value: object) -> list[JudgePanelMember]:
+    if not isinstance(value, list):
+        raise RunDataError("judge_panel must be a list")
+    panel: list[JudgePanelMember] = []
+    for item in value:
+        raw = _mapping(item, "judge")
+        panel.append(
+            {
+                "model": _string(raw.get("model"), "judge model"),
+                "samples": _count(raw.get("samples")),
+            }
+        )
+    return panel
+
+
+_REASONS: dict[str, TerminationReason] = {
+    "threshold": "threshold",
+    "max_cycles": "max_cycles",
+    "generation_error": "generation_error",
+    "judge_error": "judge_error",
+    "budget_exceeded": "budget_exceeded",
+    "interrupted": "interrupted",
+}
+
+
+def _termination(value: object) -> TerminationReason | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise RunDataError("termination_reason is unknown")
+    reason = _REASONS.get(value)
+    if reason is None:
+        raise RunDataError("termination_reason is unknown")
+    return reason
+
+
+def _mapping(value: object, label: str) -> dict[str, object]:
+    if not isinstance(value, dict):
+        raise RunDataError(f"{label} is not an object")
+    mapped: dict[str, object] = {}
+    for key, item in value.items():
+        if not isinstance(key, str):
+            raise RunDataError(f"{label} has a non-string key")
+        mapped[key] = item
+    return mapped
+
+
+def _string(value: object, label: str) -> str:
+    if not isinstance(value, str):
+        raise RunDataError(f"{label} must be a string")
+    return value
+
+
+def _optional_string(value: object, label: str) -> str | None:
+    if value is None:
+        return None
+    return _string(value, label)
+
+
+def _string_list(value: object, label: str) -> list[str]:
+    if not isinstance(value, list):
+        raise RunDataError(f"{label} must be a list")
+    return [_string(item, label) for item in value]
+
+
+def _optional_bool(value: object, label: str) -> bool | None:
+    if value is None:
+        return None
+    if not isinstance(value, bool):
+        raise RunDataError(f"{label} must be a boolean")
+    return value
+
+
+def _optional_amount(value: object) -> float | None:
+    if value is None:
+        return None
+    return _amount(value)
 
 
 def _project_root() -> Path | None:
