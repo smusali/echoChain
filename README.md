@@ -107,9 +107,52 @@ echochain --out /tmp/echochain-runs --start "Redis uses single-threaded event lo
 
 # Check results
 ls runs/
+
+# The same commands with the run subcommand
+echochain run --seed redis-epoll
+
+# Resolved settings, with the API key removed
+echochain config show
+
+# Check the configured models before a paid call
+echochain models
+
+# CSV and a fidelity table from a finished run directory
+echochain export runs/<run-directory>
+echochain analyze runs/<run-directory>
 ```
 
+`echochain --start` is `echochain run --start`. `--quiet` hides the per-step lines. `--verbose` adds token counts and cost to those lines. Every run ends with the termination reason and the run directory.
+
 The `echochain` command is [`echochain.cli:main`](https://github.com/smusali/echoChain/blob/main/echochain/cli.py). `python -m echochain` calls the same function from [`echochain/__main__.py`](https://github.com/smusali/echoChain/blob/main/echochain/__main__.py). A live run calls OpenRouter and spends money. Each run is a new directory named with a UTC timestamp and a UUID ([`mk_exp_dir`](https://github.com/smusali/echoChain/blob/main/echochain/persistence.py)). `--out` chooses the parent directory and defaults to `runs`. `--budget` is a USD cap. When spend reaches it, the process records `budget_exceeded` and exits with code 3.
+
+## Configuration
+
+Settings resolve in this order: CLI flags, then environment variables, then a TOML file, then the defaults in [`echochain/config.py`](https://github.com/smusali/echoChain/blob/main/echochain/config.py). [`examples/study.toml`](examples/study.toml) selects the study split, three conditions, and three repeats. Paths written in the file are relative to that file. Flag paths are relative to the working directory.
+
+`echochain.toml` in the working directory is used when `--config` and `ECHOCHAIN_CONFIG` are unset. `echochain config show` prints the resolved JSON. It has no API-key field. The key stays in `OPENROUTER_API_KEY` or `.env`. A file that contains `api_key` is rejected.
+
+`--model` may be repeated and replaces the whole rotating list. `--judge` may be repeated. `identity` stays at temperature 0. A provider pin is `model=provider,provider|false` and is sent only for models that have one. With no pins, requests stay as they are.
+
+Unknown keys, wrong types, and an empty model list exit with code 2. The message names the setting.
+
+## Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | Completed, because the threshold or the cycle cap was reached |
+| 1 | Runtime or API failure, including a generation or judge failure |
+| 2 | Usage or configuration error |
+| 3 | Budget exceeded |
+| 130 | Interrupted |
+
+`echochain --help` lists the same codes.
+
+## Cost and budgets
+
+`--dry-run` prints the run count, the maximum call count, `tokens_upper_bound`, and `cost_upper_bound_usd`. It does not make a completion call. The token ceiling is the rendered prompt, or `max_tokens` for a later step's input, plus `max_tokens` for the completion, plus 16 tokens of chat framing. The cost ceiling uses the full prompt and completion prices from OpenRouter's model list, plus `pricing.request` when that field is present. Cache-read prices are not used. The list is fetched once per command and is not stored.
+
+Without a key, or when a model has no price, the cost line is `unknown`. A known estimate above `confirm_above_usd` (default `$1`) does not start unless you pass `--yes`. `--dry-run` never asks for `--yes`. `--budget` still stops a run that is already in progress.
 
 ## Output
 
@@ -147,8 +190,9 @@ echoChain/
 │   ├── client.py        # OpenRouter API communication
 │   ├── judge.py         # Judge scoring
 │   ├── prompts.py       # Jinja2 templates
-│   ├── config.py        # Models, score bounds, and the step limit
+│   ├── config.py        # Defaults, the experiment file, and the API key
 │   └── persistence.py   # Manifest, CSV, and JSONL output
+├── examples/study.toml  # One study configuration
 ├── schemas/             # JSON Schemas for the manifest and JSONL rows
 ├── seeds/v1.toml        # Versioned seed corpus
 ├── tests/               # Offline tests

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import tomllib
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from importlib.resources import files
 from pathlib import Path
@@ -11,8 +11,15 @@ from typing import Literal
 from jinja2 import Template
 
 from echochain.config import (
+    JUDGE_ERROR_DENOMINATOR,
+    JUDGE_ERROR_NUMERATOR,
+    JUDGE_MODEL,
+    JUDGE_SAMPLES,
+    JUDGE_TEMPERATURE,
     MAX_CYCLES,
     ROTATING_MODELS,
+    SCORE_MAX,
+    SCORE_MIN,
     STOP_CONSECUTIVE,
     STOP_SCORE,
     TRANSFORM_TEMPERATURE,
@@ -65,6 +72,17 @@ class SeedRef:
 
 
 @dataclass(frozen=True)
+class StepNote:
+    step: int
+    total: int
+    phase: str
+    model: str
+    prompt_tokens: int
+    completion_tokens: int
+    cost: float
+
+
+@dataclass(frozen=True)
 class RunSpec:
     condition: Condition
     models: tuple[str, ...]
@@ -75,6 +93,14 @@ class RunSpec:
     corpus_version: str | None
     corpus_sha256: str | None
     budget: float | None = None
+    judge_models: tuple[str, ...] = (JUDGE_MODEL,)
+    judge_samples: int = JUDGE_SAMPLES
+    judge_temperature: float = JUDGE_TEMPERATURE
+    score_min: int = SCORE_MIN
+    score_max: int = SCORE_MAX
+    judge_error_numerator: int = JUDGE_ERROR_NUMERATOR
+    judge_error_denominator: int = JUDGE_ERROR_DENOMINATOR
+    on_step: Callable[[StepNote], None] | None = None
 
 
 def stop_rule_name(consecutive: int) -> str:
@@ -95,12 +121,15 @@ def stop_rule_name(consecutive: int) -> str:
 
 def condition_table(
     models: Sequence[str] = ROTATING_MODELS,
+    *,
+    temperature: float = TRANSFORM_TEMPERATURE,
 ) -> dict[str, Condition]:
     """Return the named conditions.
 
     Args:
         models: Models a rotating schedule draws from. The first model is the
             fixed-model control.
+        temperature: Transform temperature. The identity condition stays at 0.
 
     Returns:
         Conditions keyed by name.
@@ -111,7 +140,6 @@ def condition_table(
     if not models:
         raise DesignError("no models configured")
     fixed = f"{_FIXED_PREFIX}{models[0]}"
-    temperature = TRANSFORM_TEMPERATURE
     return {
         "alternate": Condition("alternate", "alternate", "telephone", temperature),
         "swap": Condition("swap", "swap", "telephone", temperature),
@@ -123,12 +151,19 @@ def condition_table(
     }
 
 
-def resolve_conditions(names: Sequence[str] | None) -> tuple[Condition, ...]:
+def resolve_conditions(
+    names: Sequence[str] | None = None,
+    models: Sequence[str] = ROTATING_MODELS,
+    *,
+    temperature: float = TRANSFORM_TEMPERATURE,
+) -> tuple[Condition, ...]:
     """Resolve condition names.
 
     Args:
         names: Requested names. None selects `alternate`. `all` selects the
             treatment and the three controls.
+        models: Models a rotating schedule draws from.
+        temperature: Transform temperature. The identity condition stays at 0.
 
     Returns:
         Conditions in the requested order.
@@ -136,7 +171,7 @@ def resolve_conditions(names: Sequence[str] | None) -> tuple[Condition, ...]:
     Raises:
         DesignError: A name is unknown.
     """
-    table = condition_table()
+    table = condition_table(models, temperature=temperature)
     chosen = list(CONTROL_NAMES) if names is not None and "all" in names else None
     if chosen is None:
         chosen = ["alternate"] if not names else list(names)

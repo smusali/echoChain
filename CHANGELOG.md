@@ -13,11 +13,15 @@ Next release is `0.2.0`, tracked in [Upgrade to v0.2.0](https://github.com/smusa
 
 ### Added
 
+- An experiment TOML file, with CLI flags overriding environment variables, then the file, then the built-in defaults. `echochain config show` prints the resolved settings and redacts the API key.
+- `run`, `config show`, `models`, `export`, and `analyze`. `echochain --start` is still `echochain run --start`.
+- `--dry-run` prints a token ceiling and a cost ceiling from the OpenRouter model list. A priced estimate above `confirm_above_usd` (default `$1`) waits for `--yes`.
 - Each run writes `manifest.json` and a complete JSONL row under `runs/<UTC>_<run id>/`.
 - `--out` chooses the run root, and `--budget` stops a run with exit code 3.
 - Named schedules (`alternate`, `swap`, `factorial`, `latin`, and `fixed:<model>`) and the control conditions `same-model`, `identity`, and `paraphrase`.
 - `seeds/v1.toml`, a versioned corpus. Runs can select a seed by id or a split.
 - `--condition`, `--repeats`, and `--dry-run`. `--dry-run` prints the call count and, when a key is set, a cost upper bound.
+- Exit code `1` for a generation failure, a judge failure, or an API failure. `0` is only a finished threshold or a finished cycle cap.
 - `results/pilot-2026-10/` records the runs that finished before the OpenRouter account could no longer reserve a call. The directory includes the manifests, the JSONL, the plot, and a paragraph on those limits.
 
 ### Changed

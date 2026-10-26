@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import statistics
 from dataclasses import dataclass
 
 from echochain.client import (
@@ -9,16 +10,16 @@ from echochain.client import (
     GenerationError,
     merge_attempts,
 )
-from echochain.config import JUDGE_ERROR_DENOMINATOR, JUDGE_ERROR_NUMERATOR
 from echochain.design import (
     RunSpec,
+    StepNote,
     default_spec,
     model_for,
     phase_for,
     render_transform,
     score_kind,
 )
-from echochain.judge import Judgement, JudgeSample, score
+from echochain.judge import JudgeCall, Judgement, JudgeSample, ScoreKind, score
 from echochain.persistence import (
     JudgeRecord,
     JudgeSampleRecord,
@@ -41,6 +42,19 @@ class _Spending:
     def add(self, cost: float) -> bool:
         self.spent += cost
         return self.blocked()
+
+
+@dataclass
+class _Run:
+    plan: RunSpec
+    client: ChatClient
+    spending: _Spending
+    seed: str
+    recorder: Recorder
+    run_id: str
+    current: str
+    failures: int = 0
+    streak: int = 0
 
 
 @dataclass(frozen=True)
@@ -88,53 +102,130 @@ def cycle(
         Why the run stopped.
     """
     plan = default_spec() if spec is None else spec
-    spending = _Spending(plan.budget)
-    reason: TerminationReason = "max_cycles"
-    if spending.blocked():
+    state = _Run(
+        plan=plan,
+        client=client,
+        spending=_Spending(plan.budget),
+        seed=seed,
+        recorder=recorder,
+        run_id=run_id,
+        current=seed,
+    )
+    if state.spending.blocked():
         return "budget_exceeded"
-    current = seed
-    failures = 0
-    streak = 0
     for index in range(1, plan.max_cycles + 1):
-        phase = phase_for(plan.condition.prompts, index)
-        model = model_for(plan.condition.schedule, plan.models, index)
-        prompt = render_transform(phase, current)
-        kind = score_kind(phase)
-        text = _Text(run_id, index, phase, kind, prompt, current)
-        messages: list[ChatMessage] = [{"role": "user", "content": prompt}]
-        try:
-            reply = client.chat(model, messages, temperature=plan.condition.temperature)
-        except GenerationError as exc:
-            reply = merge_attempts(exc.attempts)
-            spending.add(reply.usage.cost)
-            recorder.generation_errors += 1
-            _log(recorder, _described(plan, text, reply), None, ())
-            reason = "generation_error"
+        reason = _turn(state, index)
+        if reason is not None:
+            return reason
+    return "max_cycles"
+
+
+def _turn(state: _Run, index: int) -> TerminationReason | None:
+    plan = state.plan
+    phase = phase_for(plan.condition.prompts, index)
+    model = model_for(plan.condition.schedule, plan.models, index)
+    prompt = render_transform(phase, state.current)
+    kind = score_kind(phase)
+    text = _Text(state.run_id, index, phase, kind, prompt, state.current)
+    messages: list[ChatMessage] = [{"role": "user", "content": prompt}]
+    try:
+        reply = state.client.chat(
+            model, messages, temperature=plan.condition.temperature
+        )
+    except GenerationError as exc:
+        reply = merge_attempts(exc.attempts)
+        state.spending.add(reply.usage.cost)
+        state.recorder.generation_errors += 1
+        _log(state.recorder, _described(plan, text, reply), None, ())
+        _notify(state, text, reply, None, ())
+        return "generation_error"
+    step = _described(plan, text, reply)
+    if state.spending.add(reply.usage.cost):
+        _log(state.recorder, step, None, ())
+        _notify(state, text, reply, None, ())
+        return "budget_exceeded"
+    try:
+        judgement = _judgement(state, reply.text, kind)
+    except GenerationError as exc:
+        failed = exc.attempts
+        state.spending.add(merge_attempts(failed).usage.cost)
+        state.recorder.generation_errors += 1
+        _log(state.recorder, step, None, failed)
+        _notify(state, text, reply, None, failed)
+        return "generation_error"
+    state.recorder.judge_errors += judgement.errors
+    _log(state.recorder, step, judgement, ())
+    _notify(state, text, reply, judgement, ())
+    state.failures, state.streak, stop = _stop(
+        state.failures, state.streak, kind, judgement.mean, plan
+    )
+    state.current = reply.text
+    if state.spending.blocked():
+        return "budget_exceeded"
+    return stop
+
+
+def _judgement(state: _Run, transformed: str, kind: ScoreKind) -> Judgement:
+    samples: list[JudgeSample] = []
+    errors = 0
+    plan = state.plan
+    for model in plan.judge_models:
+        part = score(
+            state.seed,
+            transformed,
+            state.client,
+            state.spending.add,
+            JudgeCall(
+                kind=kind,
+                model=model,
+                samples=plan.judge_samples,
+                temperature=plan.judge_temperature,
+                score_min=plan.score_min,
+                score_max=plan.score_max,
+            ),
+        )
+        samples.extend(part.samples)
+        errors += part.errors
+        if state.spending.blocked():
             break
-        step = _described(plan, text, reply)
-        if spending.add(reply.usage.cost):
-            _log(recorder, step, None, ())
-            reason = "budget_exceeded"
-            break
-        try:
-            judgement = score(seed, reply.text, client, spending.add, kind=kind)
-        except GenerationError as exc:
-            spending.add(merge_attempts(exc.attempts).usage.cost)
-            recorder.generation_errors += 1
-            _log(recorder, step, None, exc.attempts)
-            reason = "generation_error"
-            break
-        recorder.judge_errors += judgement.errors
-        _log(recorder, step, judgement, ())
-        failures, streak, stop = _stop(failures, streak, kind, judgement.mean, plan)
-        current = reply.text
-        if spending.blocked():
-            reason = "budget_exceeded"
-            break
-        if stop is not None:
-            reason = stop
-            break
-    return reason
+    values = [sample.score for sample in samples if sample.score is not None]
+    mean = None if not values else statistics.mean(values)
+    return Judgement(mean=mean, samples=tuple(samples), errors=errors)
+
+
+def _notify(
+    state: _Run,
+    text: _Text,
+    reply: Completion,
+    judgement: Judgement | None,
+    failed: tuple[Completion, ...],
+) -> None:
+    on_step = state.plan.on_step
+    if on_step is None:
+        return
+    prompt_tokens = reply.usage.prompt_tokens
+    completion_tokens = reply.usage.completion_tokens
+    cost = reply.usage.cost
+    if judgement is not None:
+        for sample in judgement.samples:
+            prompt_tokens += sample.completion.usage.prompt_tokens
+            completion_tokens += sample.completion.usage.completion_tokens
+            cost += sample.completion.usage.cost
+    for attempt in failed:
+        prompt_tokens += attempt.usage.prompt_tokens
+        completion_tokens += attempt.usage.completion_tokens
+        cost += attempt.usage.cost
+    on_step(
+        StepNote(
+            step=text.index,
+            total=state.plan.max_cycles,
+            phase=text.phase,
+            model=reply.requested_model,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            cost=cost,
+        )
+    )
 
 
 def _stop(
@@ -148,7 +239,10 @@ def _stop(
         failures += 1
     elif kind == "fidelity":
         streak = _fidelity_streak(streak, mean, plan.stop_score)
-    if failures * JUDGE_ERROR_DENOMINATOR > plan.max_cycles * JUDGE_ERROR_NUMERATOR:
+    if (
+        failures * plan.judge_error_denominator
+        > plan.max_cycles * plan.judge_error_numerator
+    ):
         return failures, streak, "judge_error"
     if plan.stop_consecutive > 0 and streak >= plan.stop_consecutive:
         return failures, streak, "threshold"
