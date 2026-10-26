@@ -86,6 +86,7 @@ from echochain.prompts import (
     JUDGE_SYS,
     JUDGE_USER_TMPL,
     RUBRIC_VERSION,
+    template_bytes,
     template_hashes,
 )
 from jsonschema import Draft202012Validator
@@ -2281,10 +2282,13 @@ def test_prompt_ledger_matches_package_data() -> None:
         "answerability_user.j2": "answerability",
     }
     assert RUBRIC_VERSION == "2"
+    stored = template_bytes()
     for filename, (version, digest) in _LEDGER.items():
         raw = files("echochain.prompts").joinpath(filename).read_bytes()
+        canonical = raw.replace(b"\r\n", b"\n")
         assert version == "2"
-        assert hashlib.sha256(raw).hexdigest() == digest
+        assert hashlib.sha256(canonical).hexdigest() == digest
+        assert stored[names[filename]] == canonical
         assert found[names[filename]] == digest
 
 

@@ -56,20 +56,20 @@ def shield(text: str, tag: str) -> str:
 
 
 def template_bytes() -> dict[str, bytes]:
-    """Read the raw template files.
+    """Read the template files.
 
     Returns:
-        File bytes keyed by template name.
+        Template bytes keyed by name. Newlines are LF, so the digest does not
+        depend on the checkout.
     """
-    loaded = {
-        key: files("echochain.prompts").joinpath(filename).read_bytes()
+    return {
+        key: _lf(files("echochain.prompts").joinpath(filename).read_bytes())
         for key, filename in _FILES
     }
-    return loaded
 
 
 def template_hashes() -> dict[str, str]:
-    """Hash the raw template files.
+    """Hash the template files.
 
     Returns:
         SHA-256 hex digests keyed by template name.
@@ -77,6 +77,10 @@ def template_hashes() -> dict[str, str]:
     return {
         key: hashlib.sha256(raw).hexdigest() for key, raw in template_bytes().items()
     }
+
+
+def _lf(raw: bytes) -> bytes:
+    return raw.replace(b"\r\n", b"\n")
 
 
 def _version(block: str, filename: str) -> str:
