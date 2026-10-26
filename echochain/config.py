@@ -8,6 +8,7 @@ import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from echochain.prompts import RUBRIC_VERSION
 
@@ -173,10 +174,15 @@ class ConfigError(RuntimeError):
     pass
 
 
+DataCollection = Literal["allow", "deny"]
+
+
 @dataclass(frozen=True)
 class ProviderPin:
     order: tuple[str, ...]
     allow_fallbacks: bool
+    data_collection: DataCollection | None = None
+    zdr: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -663,13 +669,22 @@ def _finalize(bounds: dict[str, _Bound]) -> Settings:
     )
 
 
+def _pin_payload(pin: ProviderPin) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "allow_fallbacks": pin.allow_fallbacks,
+        "order": list(pin.order),
+    }
+    if pin.data_collection is not None:
+        payload["data_collection"] = pin.data_collection
+    if pin.zdr is not None:
+        payload["zdr"] = pin.zdr
+    return payload
+
+
 def _payload(settings: Settings) -> dict[str, object]:
     providers: dict[str, object] = {}
     for model, pin in settings.providers:
-        providers[model] = {
-            "allow_fallbacks": pin.allow_fallbacks,
-            "order": list(pin.order),
-        }
+        providers[model] = _pin_payload(pin)
     return {
         "base_url": settings.base_url,
         "budget": settings.budget,
@@ -812,7 +827,7 @@ def _providers_table(source: str, value: object) -> tuple[tuple[str, ProviderPin
         model_id = _model_id(source, "providers", model)
         fields = _mapping(raw, source, model_id)
         for name in fields:
-            if name not in {"order", "allow_fallbacks"}:
+            if name not in {"order", "allow_fallbacks", "data_collection", "zdr"}:
                 raise ConfigError(f"{source}: unknown key {name}")
         if "order" not in fields:
             raise ConfigError(f"{source}: {model_id} is missing order")
@@ -823,8 +838,37 @@ def _providers_table(source: str, value: object) -> tuple[tuple[str, ProviderPin
             if not isinstance(flag, bool):
                 raise ConfigError(f"{source}: allow_fallbacks must be a boolean")
             allow = flag
-        pairs.append((model_id, ProviderPin(order, allow)))
+        pairs.append(
+            (
+                model_id,
+                ProviderPin(
+                    order, allow, _data_collection(source, fields), _zdr(source, fields)
+                ),
+            )
+        )
     return _pin_tuple(source, pairs)
+
+
+def _data_collection(
+    source: str, fields: Mapping[str, object]
+) -> DataCollection | None:
+    if "data_collection" not in fields:
+        return None
+    value = fields["data_collection"]
+    if value == "allow":
+        return "allow"
+    if value == "deny":
+        return "deny"
+    raise ConfigError(f"{source}: data_collection must be allow or deny")
+
+
+def _zdr(source: str, fields: Mapping[str, object]) -> bool | None:
+    if "zdr" not in fields:
+        return None
+    flag = fields["zdr"]
+    if not isinstance(flag, bool):
+        raise ConfigError(f"{source}: zdr must be a boolean")
+    return flag
 
 
 def _provider_order(source: str, value: object) -> tuple[str, ...]:

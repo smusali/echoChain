@@ -453,6 +453,7 @@ def test_preflight_missing_seed(
 def test_fake_cycle_records_served_model(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
@@ -472,17 +473,24 @@ def test_fake_cycle_records_served_model(
         )
         recorder.finish(reason)
     assert reason == "max_cycles"
-    with (run.directory / "chain.csv").open(encoding="utf-8", newline="") as handle:
-        rows = list(csv.DictReader(handle))
-    assert len(rows) == MAX_CYCLES
+    assert not (run.directory / "chain.csv").exists()
+    assert main(["export", "--format", "csv", str(run.directory)]) == 0
+    rows = list(csv.DictReader(io.StringIO(capsys.readouterr().out)))
+    saved = _read_jsonl(run.directory / "chain.jsonl")
+    assert len(rows) == len(saved) == MAX_CYCLES
     requested = configured_models()[0]
+    for exported, record in zip(rows, saved, strict=True):
+        assert exported["cycle"] == str(record["step"])
+        assert exported["phase"] == record["phase"]
+        assert exported["model"] == record["requested_model"]
+        assert exported["served_model"] == record["served_model"]
+        assert exported["text"] == record["output_text"]
     assert rows[0]["model"] == requested
     assert rows[0]["served_model"] == f"{requested}-served"
     assert rows[0]["phase"] == "a2q"
     assert float(rows[0]["score"]) == 1.0
-    saved = _read_jsonl(run.directory / "chain.jsonl")
-    assert len(saved) == MAX_CYCLES
     assert saved[0]["served_model"] == f"{requested}-served"
+    assert saved[0]["provider"] == "Example"
     assert saved[0]["phase"] == "a2q"
     assert saved[0]["score_kind"] == "answerability"
     assert saved[0]["condition"] == "alternate"
@@ -500,6 +508,10 @@ def test_fake_cycle_records_served_model(
     assert finished["cost"] == cost
     assert finished["termination_reason"] == "max_cycles"
     assert finished["status"] == "finished"
+    assert {"model": requested, "provider": "Example"} in _pairs(finished["providers"])
+    assert {"model": JUDGE_MODEL, "provider": "Example"} in _pairs(
+        finished["providers"]
+    )
     schedule = _object(finished["schedule"])
     assert schedule["name"] == "alternate"
     assert finished["stop_rule"] == {
@@ -614,6 +626,9 @@ def test_retries_follow_status(
         assert body["max_tokens"] == MAX_TOKENS
         assert body["temperature"] == TRANSFORM_TEMPERATURE
         assert "response_format" not in body
+        provider = _object(body["provider"])
+        assert provider["require_parameters"] is True
+        assert provider["allow_fallbacks"] is False
 
 
 def test_slow_stream_stops_at_deadline() -> None:
@@ -874,13 +889,18 @@ def test_crash_leaves_running_manifest(tmp_path: Path) -> None:
         seed=_SEED,
         budget=None,
     )
-    with pytest.raises(RuntimeError, match="boom"), Recorder(run.directory, manifest):
+    with (
+        pytest.raises(RuntimeError, match="boom"),
+        Recorder(run.directory, manifest) as recorder,
+    ):
         raise RuntimeError("boom")
+    assert recorder.jl.closed
     payload = _read_manifest(run.directory / "manifest.json")
     _validate(payload, "manifest.schema.json")
-    assert payload["status"] == "running"
+    assert payload["status"] == "failed"
+    assert payload["error"] == "RuntimeError: boom"
     assert payload["termination_reason"] is None
-    assert payload["ended_at"] is None
+    assert isinstance(payload["ended_at"], str)
 
 
 class _Scripted:
@@ -933,6 +953,10 @@ class _Scripted:
 
 
 class _Interrupt:
+    def __init__(self, ready: int = 0) -> None:
+        self._ready = ready
+        self._seen = 0
+
     def __enter__(self) -> _Interrupt:
         return self
 
@@ -952,7 +976,14 @@ class _Interrupt:
         *,
         response_format: ResponseFormatJSONSchema | None = None,
     ) -> Completion:
-        raise KeyboardInterrupt
+        if self._seen >= self._ready:
+            raise KeyboardInterrupt
+        self._seen += 1
+        if model == JUDGE_MODEL:
+            text = '{"rationale": "ok", "score": 8}'
+        else:
+            text = "preserved answer"
+        return _completion(text, model, temperature=temperature)
 
 
 def _install_client(
@@ -1213,14 +1244,34 @@ def test_interrupt_records_the_reason(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    _install_client(monkeypatch, tmp_path, _Interrupt())
-    assert main(["--start", _SEED, "--out", str(tmp_path)]) == _EXIT_INTERRUPTED
-    assert "interrupted" in capsys.readouterr().err
+    _install_client(monkeypatch, tmp_path, _Interrupt(2))
+    assert (
+        main(["--start", _SEED, "--out", str(tmp_path), "--max-cycles", "2"])
+        == _EXIT_INTERRUPTED
+    )
+    assert capsys.readouterr().err.count("interrupted") == 1
     run = next(path for path in tmp_path.iterdir() if path.is_dir())
     finished = _read_manifest(run / "manifest.json")
     _validate(finished, "manifest.schema.json")
     assert finished["status"] == "finished"
     assert finished["termination_reason"] == "interrupted"
+    saved = _read_jsonl(run / "chain.jsonl")
+    assert [row["step"] for row in saved] == [1]
+    monkeypatch.setattr(
+        "echochain.client.OpenRouterClient",
+        lambda *_args, **_kwargs: _FakeChat("preserved answer"),
+    )
+    run_id = finished["run_id"]
+    assert isinstance(run_id, str)
+    assert main(["run", "--resume", run_id, "--out", str(tmp_path)]) == 0
+    resumed = _read_jsonl(run / "chain.jsonl")
+    assert [row["step"] for row in resumed] == [1, 2]
+    assert resumed[0] == saved[0]
+    assert not (run / "chain.csv").exists()
+    continued = _read_manifest(run / "manifest.json")
+    _validate(continued, "manifest.schema.json")
+    assert continued["status"] == "finished"
+    assert continued["termination_reason"] == "max_cycles"
 
 
 def test_dry_run_counts_calls(
@@ -1336,6 +1387,88 @@ def test_judge_requests_strict_schema(tmp_path: Path) -> None:
     assert schema["name"] == "judge_score"
     provider = _object(bodies[1]["provider"])
     assert provider["require_parameters"] is True
+    for body in bodies:
+        routed = _object(body["provider"])
+        assert routed["require_parameters"] is True
+        assert routed["allow_fallbacks"] is False
+    saved = _read_jsonl(run.directory / "chain.jsonl")
+    assert saved[0]["provider"] == "Example"
+    finished = _read_manifest(run.directory / "manifest.json")
+    assert {"model": saved[0]["requested_model"], "provider": "Example"} in _pairs(
+        finished["providers"]
+    )
+    _pinned_provider_stops(tmp_path)
+
+
+def _pairs(value: object) -> list[dict[str, object]]:
+    if not isinstance(value, list):
+        raise TypeError("providers are not a list")
+    return [_object(item) for item in value]
+
+
+def _pinned_provider_stops(tmp_path: Path) -> None:
+    path = tmp_path / "pins.toml"
+    path.write_text(
+        "\n".join(
+            [
+                "[providers.model]",
+                'order = ["alpha"]',
+                "allow_fallbacks = false",
+                'data_collection = "deny"',
+                "zdr = true",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    pinned = resolve_settings(config=path, environ={})
+    bodies: list[dict[str, object]] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        bodies.append(_object(json.loads(request.content)))
+        return httpx2.Response(
+            404,
+            json={"error": {"message": "provider unavailable", "type": "error"}},
+        )
+
+    with (
+        OpenRouterClient(
+            "test-key",
+            transport=httpx2.MockTransport(handler),
+            deadline=5.0,
+            settings=pinned,
+        ) as client,
+        pytest.raises(APIStatusError),
+    ):
+        client.chat("model", [{"role": "user", "content": "hi"}], 0.3)
+    assert len(bodies) == 1
+    provider = _object(bodies[0]["provider"])
+    assert provider["order"] == ["alpha"]
+    assert provider["allow_fallbacks"] is False
+    assert provider["require_parameters"] is True
+    assert provider["data_collection"] == "deny"
+    assert provider["zdr"] is True
+
+    allowed = resolve_settings(
+        environ={},
+        overrides={"providers": "model=alpha|true"},
+    )
+    accepted: list[dict[str, object]] = []
+
+    def allow(request: httpx2.Request) -> httpx2.Response:
+        accepted.append(_object(json.loads(request.content)))
+        return httpx2.Response(200, json=_chat_payload("hello"))
+
+    with OpenRouterClient(
+        "test-key",
+        transport=httpx2.MockTransport(allow),
+        deadline=5.0,
+        settings=allowed,
+    ) as client:
+        client.chat("model", [{"role": "user", "content": "hi"}], 0.3)
+    fallback = _object(accepted[0]["provider"])
+    assert fallback["order"] == ["alpha"]
+    assert fallback["allow_fallbacks"] is True
 
 
 def _hand_bound(
@@ -1691,11 +1824,15 @@ _PRECEDENCE: tuple[tuple[object, ...], ...] = (
     ),
     (
         "providers",
-        '[providers."example/model"]\norder = ["alpha"]\nallow_fallbacks = false\n',
+        '[providers."example/model"]\n'
+        'order = ["alpha"]\n'
+        "allow_fallbacks = false\n"
+        'data_collection = "deny"\n'
+        "zdr = true\n",
         "ECHOCHAIN_PROVIDERS",
         "example/model=beta|true",
         {"providers": "example/model=gamma|false"},
-        (("example/model", _PIN(("alpha",), False)),),
+        (("example/model", _PIN(("alpha",), False, "deny", True)),),
         (("example/model", _PIN(("beta",), True)),),
         (("example/model", _PIN(("gamma",), False)),),
         (),

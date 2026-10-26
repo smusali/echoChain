@@ -25,6 +25,7 @@ from openai.types.shared_params.response_format_json_schema import (
 
 from echochain.config import (
     REQUIRED_PARAMETERS,
+    DataCollection,
     ProviderPin,
     Settings,
     default_settings,
@@ -105,6 +106,8 @@ class _ProviderBody(TypedDict, total=False):
     require_parameters: bool
     order: list[str]
     allow_fallbacks: bool
+    data_collection: DataCollection
+    zdr: bool
 
 
 class _ProviderExtra(TypedDict):
@@ -333,7 +336,7 @@ class OpenRouterClient:
                 temperature,
                 response_format,
                 self._max_tokens,
-                _provider_body(self._pins, model, response_format is not None),
+                _provider_body(self._pins, model),
             ),
         )
         latency = time.perf_counter() - started
@@ -494,23 +497,23 @@ class _Outbound:
     temperature: float
     response_format: ResponseFormatJSONSchema | None
     max_tokens: int
-    extra: _ProviderExtra | None
+    extra: _ProviderExtra
 
 
-def _provider_body(
-    pins: Mapping[str, ProviderPin],
-    model: str,
-    structured: bool,
-) -> _ProviderExtra | None:
+def _provider_body(pins: Mapping[str, ProviderPin], model: str) -> _ProviderExtra:
     pin = pins.get(model)
-    if pin is None and not structured:
-        return None
-    body: _ProviderBody = {}
-    if structured:
-        body["require_parameters"] = True
-    if pin is not None:
-        body["order"] = list(pin.order)
-        body["allow_fallbacks"] = pin.allow_fallbacks
+    allow = False if pin is None else pin.allow_fallbacks
+    body: _ProviderBody = {
+        "require_parameters": True,
+        "allow_fallbacks": allow,
+    }
+    if pin is None:
+        return {"provider": body}
+    body["order"] = list(pin.order)
+    if pin.data_collection is not None:
+        body["data_collection"] = pin.data_collection
+    if pin.zdr is not None:
+        body["zdr"] = pin.zdr
     return {"provider": body}
 
 

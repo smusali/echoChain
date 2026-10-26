@@ -39,7 +39,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-  "pytest>=8,<9",
+  "pytest>=9.0.3,<10",
+  "pytest-cov>=7,<8",
   "pytest-socket>=0.8,<1",
   "jsonschema>=4.23,<5",
   "types-jsonschema>=4.23,<5",
@@ -48,6 +49,7 @@ dev = [
   "pre-commit>=4,<5",
   "build>=1,<2",
   "twine>=7,<8",
+  "pip-audit>=2.9,<3",
 ]
 
 [project.scripts]
@@ -69,6 +71,7 @@ only-include = [
   "README.md",
   "LICENSE",
   "CHANGELOG.md",
+  "SECURITY.md",
   "schemas",
   "seeds",
   "examples",
@@ -98,8 +101,15 @@ convention = "google"
 "echochain/prompts.py" = ["E501"]
 
 [tool.pytest.ini_options]
-addopts = "--disable-socket --allow-unix-socket"
+addopts = "--disable-socket --allow-unix-socket --cov=echochain --cov-report=term-missing"
 testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["echochain"]
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true
 
 [tool.mypy]
 python_version = "3.11"

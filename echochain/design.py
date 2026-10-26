@@ -101,6 +101,9 @@ class RunSpec:
     judge_error_numerator: int = JUDGE_ERROR_NUMERATOR
     judge_error_denominator: int = JUDGE_ERROR_DENOMINATOR
     on_step: Callable[[StepNote], None] | None = None
+    start_step: int = 1
+    opening_text: str | None = None
+    spent: float = 0.0
 
 
 def stop_rule_name(consecutive: int) -> str:

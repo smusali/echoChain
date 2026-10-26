@@ -118,8 +118,11 @@ echochain config show
 echochain models
 
 # CSV and a fidelity table from a finished run directory
-echochain export runs/<run-directory>
+echochain export --format csv runs/<run-directory>
 echochain analyze runs/<run-directory>
+
+# Continue an interrupted, failed, or unfinished run
+echochain run --resume RUN_ID
 ```
 
 `echochain --start` is `echochain run --start`. `--quiet` hides the per-step lines. `--verbose` adds token counts and cost to those lines. Every run ends with the termination reason and the run directory.
@@ -132,7 +135,17 @@ Settings resolve in this order: CLI flags, then environment variables, then a TO
 
 `echochain.toml` in the working directory is used when `--config` and `ECHOCHAIN_CONFIG` are unset. `echochain config show` prints the resolved JSON. It has no API-key field. The key stays in `OPENROUTER_API_KEY` or `.env`. A file that contains `api_key` is rejected.
 
-`--model` may be repeated and replaces the whole rotating list. `--judge` may be repeated. `identity` stays at temperature 0. A provider pin is `model=provider,provider|false` and is sent only for models that have one. With no pins, requests stay as they are.
+`--model` may be repeated and replaces the whole rotating list. `--judge` may be repeated. `identity` stays at temperature 0. Every chat call sends `require_parameters: true` and `allow_fallbacks: false`. If the provider that would serve the call is unavailable, the run fails instead of moving to another provider. A pin is `model=provider,provider|false` and adds that order for one model. `|true` allows fallbacks for that model. In the TOML file a pin can also set `data_collection` to `"deny"` and `zdr` to true:
+
+```toml
+[providers."google/gemini-3.8-flash"]
+order = ["google-vertex"]
+allow_fallbacks = false
+data_collection = "deny"
+zdr = true
+```
+
+Those two fields are described under [Data handling](#data-handling).
 
 Unknown keys, wrong types, and an empty model list exit with code 2. The message names the setting.
 
@@ -158,17 +171,18 @@ Without a key, or when a model has no price, the cost line is `unknown`. A known
 
 Each run creates a directory `runs/<UTC>_<run id>/`:
 
-- `manifest.json`, written as soon as the run starts and replaced atomically when it finishes. A crash leaves `status` set to `running`.
+- `manifest.json`, written as soon as the run starts and replaced atomically when it finishes. `providers` lists each requested model with the provider that served it. An interrupt keeps `status` as `finished`, sets `termination_reason` to `interrupted`, and exits with code 130. Any other catchable crash sets `status` to `failed` and stores a one-line `error`. A hard kill can still leave `status` as `running`, with each completed step already flushed to the JSONL.
 - `chain.jsonl`, one UTF-8 object per step. The object carries the run id, phase (`a2q`, `q2a`, `identity`, or `paraphrase`), condition, schedule, `score_kind`, requested and served model, provider, input and output text, prompt hash, finish reason, sampling parameters, latency, tokens, cost, generation id, judge samples, and a UTC timestamp. An answer step stores `fidelity_vs_seed`. A question step stores `answerability`. The other of those two fields is null. A failed judge sample stores a null score and an error code.
-- `chain.csv`, a short view of the same steps: cycle, phase, model, served model, text, and score.
 
 [`Recorder`](https://github.com/smusali/echoChain/blob/main/echochain/persistence.py) writes those files. [`test_fake_cycle_records_served_model`](https://github.com/smusali/echoChain/blob/main/tests/test_cli.py) reads them. The manifest's token and cost totals are the sum of the JSONL rows, including judge calls. Schemas for both documents are in `schemas/`.
 
-A crash can still leave an unfinished run. Resuming a run is E6 in [#15](https://github.com/smusali/echoChain/issues/15).
+`echochain export --format csv RUN` prints `cycle,phase,model,served_model,text,score` from that JSONL. A run does not write a CSV file.
+
+`echochain run --resume RUN` continues one interrupted, failed, or still-running run. `RUN` is the run directory or the run id under `--out`. The next step uses the last complete row's output, and the original seed is the first row's input. The condition, models, judge panel, stop rule, budget, and token cap come from the manifest. Provider pins and the API key come from the current configuration. Spend already recorded in the JSONL counts toward the budget. The low-score streak starts again. A run that finished for the threshold, the cycle cap, a generation failure, a judge failure, or the budget cannot be resumed. A chain with no complete step cannot be resumed, because the manifest stores the seed hash and not the seed text.
 
 ### Sample output
 
-The rows below show the file shape and the current model IDs. They are not measurements from a run.
+The rows below show the shape of `echochain export --format csv` and the current model IDs. They are not measurements from a run. The run directory does not contain this file.
 
 ```csv
 cycle,phase,model,served_model,text,score
@@ -177,7 +191,7 @@ cycle,phase,model,served_model,text,score
 3,a2q,mistralai/mistral-small-2603,mistralai/mistral-small-2603,What enables efficient I/O in databases?,5
 ```
 
-`model` is the ID that was requested. `served_model` is the ID the provider returned. Those columns are written by [`Recorder.log`](https://github.com/smusali/echoChain/blob/main/echochain/persistence.py) and checked by [`test_fake_cycle_records_served_model`](https://github.com/smusali/echoChain/blob/main/tests/test_cli.py). Current IDs are [`ROTATING_MODELS`](https://github.com/smusali/echoChain/blob/main/echochain/config.py). Runs recorded with `google/gemini-2.0-flash-001` or `anthropic/claude-sonnet-4` cannot be reproduced. Those models have been retired. Current Claude Sonnet IDs are not in the rotation because the OpenRouter catalog does not advertise `seed` for them, and every configured model must advertise `response_format` and `seed` ([`check_models`](https://github.com/smusali/echoChain/blob/main/echochain/client.py), [`test_preflight_missing_seed`](https://github.com/smusali/echoChain/blob/main/tests/test_cli.py)).
+`model` is the ID that was requested. `served_model` is the ID the provider returned. `echochain export` derives those columns from the JSONL, and [`test_fake_cycle_records_served_model`](https://github.com/smusali/echoChain/blob/main/tests/test_cli.py) compares them with the stored rows. Current IDs are [`ROTATING_MODELS`](https://github.com/smusali/echoChain/blob/main/echochain/config.py). Runs recorded with `google/gemini-2.0-flash-001` or `anthropic/claude-sonnet-4` cannot be reproduced. Those models have been retired. Current Claude Sonnet IDs are not in the rotation because the OpenRouter catalog does not advertise `seed` for them, and every configured model must advertise `response_format` and `seed` ([`check_models`](https://github.com/smusali/echoChain/blob/main/echochain/client.py), [`test_preflight_missing_seed`](https://github.com/smusali/echoChain/blob/main/tests/test_cli.py)).
 
 ## Architecture
 
@@ -191,7 +205,7 @@ echoChain/
 │   ├── judge.py         # Judge scoring
 │   ├── prompts.py       # Jinja2 templates
 │   ├── config.py        # Defaults, the experiment file, and the API key
-│   └── persistence.py   # Manifest, CSV, and JSONL output
+│   └── persistence.py   # Manifest and JSONL output
 ├── examples/study.toml  # One study configuration
 ├── schemas/             # JSON Schemas for the manifest and JSONL rows
 ├── seeds/v1.toml        # Versioned seed corpus
@@ -205,7 +219,7 @@ echoChain/
 
 - **Model rotation.** [`echochain/design.py`](https://github.com/smusali/echoChain/blob/main/echochain/design.py) assigns a model to each step. `alternate` walks [`ROTATING_MODELS`](https://github.com/smusali/echoChain/blob/main/echochain/config.py) one step at a time. `swap` walks that list backwards. `factorial` puts every model on every phase. `latin` balances models across the two phases. `fixed:<model>` uses one model for the whole chain. Every row records the schedule name. [`test_fake_cycle_records_served_model`](https://github.com/smusali/echoChain/blob/main/tests/test_cli.py) records the first ID and the served model.
 - **Judge.** [`score`](https://github.com/smusali/echoChain/blob/main/echochain/judge.py) asks [`JUDGE_MODEL`](https://github.com/smusali/echoChain/blob/main/echochain/config.py) (`openai/gpt-4.1-mini`) for a JSON object with `rationale` and an integer `score` from 1 to 10. The request uses a strict JSON schema. A reply that is empty, not an integer, or outside that range is stored as no score. Too many of those failures end the run with `judge_error`.
-- **Run record.** [`Recorder.log`](https://github.com/smusali/echoChain/blob/main/echochain/persistence.py) appends the step to `chain.csv` and `chain.jsonl`. `chain.jsonl` is the full record. The same test reads both files and checks the manifest totals.
+- **Run record.** [`Recorder.log`](https://github.com/smusali/echoChain/blob/main/echochain/persistence.py) appends the step to `chain.jsonl`. `echochain export --format csv` prints the short columns from that file. The same test reads the JSONL, the export, and the manifest totals.
 - **Budget.** `--budget` stops the run after the call that reaches the cap. Tokens and cost come from the completion response.
 - **Conditions.** `alternate` is the telephone chain with the alternating schedule. `swap` reverses that schedule. `same-model` keeps the telephone prompts and uses the first rotating model for every step. `identity` asks that model to repeat the text verbatim at temperature 0. `paraphrase` paraphrases the previous text with that model and does not turn it into a question. `--condition all` runs `alternate`, `same-model`, `identity`, and `paraphrase`.
 - **Seeds.** [`seeds/v1.toml`](https://github.com/smusali/echoChain/blob/main/seeds/v1.toml) holds the statements, each with an id, a domain, and a split (`study` or `held-out`). `--seed` selects one id. `--split study` selects the study set. The manifest stores the seed id and the corpus file hash.
@@ -232,9 +246,21 @@ Cited work:
 - Sewon Min, Kalpesh Krishna, Xinxi Lyu, Mike Lewis, Wen-tau Yih, Pang Wei Koh, Mohit Iyyer, Luke Zettlemoyer, and Hannaneh Hajishirzi. "FActScore: Fine-grained Atomic Evaluation of Factual Precision in Long Form Text Generation." EMNLP 2023. [Anthology](https://aclanthology.org/2023.emnlp-main.741/).
 - A public tool that runs the same kind of chain: [yymss/llm-telephone](https://github.com/yymss/llm-telephone).
 
+## Data handling
+
+Every seed and every intermediate text is sent to OpenRouter, which routes the call to a third-party provider. The run directory stores those texts in `chain.jsonl`. Do not use a proprietary seed until you have checked the provider's data policy.
+
+A pin can limit that routing:
+
+- `data_collection = "deny"` uses only providers that do not collect user data.
+- `zdr = true` uses only zero-data-retention endpoints.
+
+OpenRouter can also enforce zero data retention for an account. If no provider accepts the pin, the call fails. The private vulnerability report path is [SECURITY.md](https://github.com/smusali/echoChain/blob/main/SECURITY.md).
+
 ## Documentation
 
 - [CONTRIBUTING.md](https://github.com/smusali/echoChain/blob/main/CONTRIBUTING.md): setup, offline tests, and the one paid smoke test
+- [SECURITY.md](https://github.com/smusali/echoChain/blob/main/SECURITY.md): how to report a vulnerability privately
 - [CHANGELOG.md](https://github.com/smusali/echoChain/blob/main/CHANGELOG.md): release notes
 - [LICENSE](https://github.com/smusali/echoChain/blob/main/LICENSE): MIT License
 
