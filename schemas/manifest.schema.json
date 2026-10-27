@@ -39,7 +39,9 @@
     "termination_reason",
     "budget",
     "deadline_seconds",
-    "error"
+    "error",
+    "batch_id",
+    "repeat_index"
   ],
   "properties": {
     "status": {"enum": ["running", "finished", "failed"]},
@@ -179,6 +181,7 @@
         "judge_error",
         "budget_exceeded",
         "interrupted",
+        "insufficient_credits",
         null
       ]
     },
@@ -189,6 +192,18 @@
       ]
     },
     "deadline_seconds": {"type": "number", "minimum": 0},
-    "error": {"type": ["string", "null"]}
+    "error": {"type": ["string", "null"]},
+    "batch_id": {
+      "anyOf": [
+        {"type": "string", "format": "uuid"},
+        {"type": "null"}
+      ]
+    },
+    "repeat_index": {
+      "anyOf": [
+        {"type": "integer", "minimum": 0},
+        {"type": "null"}
+      ]
+    }
   }
 }

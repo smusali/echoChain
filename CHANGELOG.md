@@ -13,6 +13,9 @@ Next release is `0.2.0`, tracked in [Upgrade to v0.2.0](https://github.com/smusa
 
 ### Added
 
+- `echochain analyze` prints the restricted mean of cycles to degradation up to `max_cycles`, with a seed-clustered bootstrap interval, the median or `not reached`, and the share of runs that degraded.
+- A credit refusal that outlasts the waits finishes the run with `insufficient_credits` and exit code 3. `echochain run --resume BATCH_ID` continues the unfinished cells, and `--dry-run` on that resume counts only those cells.
+- The final status line names the last recorded step, the planned length, and, for a cycle-cap stop, where the threshold was first met.
 - Rubric version 2 asks for an anchored 1 to 5 score and the existing 1 to 10 score, plus one verdict per frozen corpus claim. Claim fidelity is the primary metric. The stop rule still reads the 1 to 10 mean.
 - Later answers are judged against the previous answer as well as the seed.
 - Each call sends `top_p` and a derived sampling seed. The manifest stores `sampling_seed`, and a row stores whether the provider echoed the seed.

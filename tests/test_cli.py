@@ -13,7 +13,7 @@ import sys
 import time
 import tomllib
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, tzinfo
 from importlib.resources import files
 from pathlib import Path
@@ -28,6 +28,7 @@ from echochain.client import (
     ChatMessage,
     Completion,
     GenerationError,
+    InsufficientCreditsError,
     ModelRecord,
     OpenRouterClient,
     Usage,
@@ -56,6 +57,7 @@ from echochain.config import (
     TRANSFORM_TEMPERATURE,
     ConfigError,
     ProviderPin,
+    Settings,
     configured_models,
     load_api_key,
     resolve_settings,
@@ -623,6 +625,7 @@ def test_network_is_blocked() -> None:
         ([503, 503, 200], "0", 5.0, "ok"),
         ([503, 503, 503], "0", 5.0, "status"),
         ([429], "30", 0.05, "deadline"),
+        ([402, 402, 402], "0", 5.0, "credits"),
     ],
 )
 def test_retries_follow_status(
@@ -662,12 +665,17 @@ def test_retries_follow_status(
         elif expected == "status":
             with pytest.raises(APIStatusError):
                 client.chat("model", [{"role": "user", "content": "hi"}], 0.3)
+        elif expected == "credits":
+            with pytest.raises(InsufficientCreditsError):
+                client.chat("model", [{"role": "user", "content": "hi"}], 0.3)
         else:
             reply = client.chat("model", [{"role": "user", "content": "hi"}], 0.3)
             assert reply.text == "hello"
     assert attempts == len(statuses)
     if expected == "slept":
         assert slept == [0.2]
+    if expected == "credits":
+        assert slept == [0.0, 0.0]
     if expected == "deadline":
         assert slept == []
     for body in bodies:
@@ -819,8 +827,8 @@ def test_budget_stops_run(
     )
     assert main(["--start", _SEED, "--budget", "0.5"]) == _EXIT_BUDGET
     message = capsys.readouterr().err
-    assert "budget_exceeded" in message
-    run = next(Path("runs").iterdir())
+    assert "budget_exceeded at step 1 of 30: results saved to " in message
+    run = next(path for path in Path("runs").iterdir() if path.is_dir())
     finished = _read_manifest(run / "manifest.json")
     saved = _read_jsonl(run / "chain.jsonl")
     _validate(finished, "manifest.schema.json")
@@ -2047,7 +2055,9 @@ def test_subcommands_use_the_fake_client(
     captured = capsys.readouterr()
     assert "step 1/1 identity" in captured.err
     assert "prompt_tokens=" in captured.err
-    assert "max_cycles" in captured.out
+    assert "max_cycles at step 1 of 1, threshold not reached: results saved to " in (
+        captured.out
+    )
     run = next(path for path in out.iterdir() if path.is_dir())
     assert main(["export", str(run)]) == 0
     assert "identity" in capsys.readouterr().out
@@ -2114,6 +2124,182 @@ def test_batch_runs_the_product(
     assert len(runs) == expected_runs
     run_ids = [_read_manifest(path / "manifest.json")["run_id"] for path in runs]
     assert len(set(run_ids)) == expected_runs
+
+
+@dataclass
+class _CreditState:
+    fail: bool = True
+    seen: int = 0
+
+
+def _study_file(directory: Path) -> Path:
+    corpus = directory / "seeds.toml"
+    corpus.write_text(
+        "\n".join(
+            [
+                'version = "v1"',
+                "[[seed]]",
+                'id = "one"',
+                'domain = "databases"',
+                'split = "study"',
+                'text = "first seed"',
+                "[[seed]]",
+                'id = "two"',
+                'domain = "databases"',
+                'split = "study"',
+                'text = "second seed"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return corpus
+
+
+def _credit_factory(
+    state: _CreditState, cutoff: int
+) -> Callable[..., OpenRouterClient]:
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        state.seen += 1
+        if state.fail and state.seen > cutoff:
+            return httpx2.Response(
+                402,
+                json={"error": {"message": "no credits", "type": "error"}},
+                headers={"retry-after": "0"},
+            )
+        body = _object(json.loads(request.content))
+        content = (
+            '{"rationale": "ok", "score": 8, "anchored": 4}'
+            if body.get("model") == JUDGE_MODEL
+            else "preserved answer"
+        )
+        return httpx2.Response(200, json=_chat_payload(content, cost=0.0))
+
+    def factory(api_key: str, *, settings: Settings) -> OpenRouterClient:
+        return OpenRouterClient(
+            api_key,
+            transport=httpx2.MockTransport(handler),
+            settings=settings,
+        )
+
+    return factory
+
+
+def _install_transport(
+    monkeypatch: pytest.MonkeyPatch,
+    directory: Path,
+    factory: Callable[..., OpenRouterClient],
+) -> None:
+    monkeypatch.chdir(directory)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr("echochain.client.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        "echochain.client.fetch_catalog",
+        lambda *_args, **_kwargs: _catalog(_full_parameters()),
+    )
+    monkeypatch.setattr("echochain.client.OpenRouterClient", factory)
+
+
+def _credit_snapshot(out: Path) -> tuple[str, dict[Path, bytes]]:
+    kept: dict[Path, bytes] = {}
+    batch_id = ""
+    for path in (item for item in out.iterdir() if item.is_dir()):
+        manifest = _read_manifest(path / "manifest.json")
+        _validate(manifest, "manifest.schema.json")
+        reason = manifest["termination_reason"]
+        if reason == "max_cycles":
+            kept[path] = (path / "chain.jsonl").read_bytes()
+            continue
+        assert reason == "insufficient_credits"
+        assert manifest["status"] == "finished"
+        error = manifest["error"]
+        assert isinstance(error, str)
+        assert error.startswith("InsufficientCreditsError:")
+        assert "\n" not in error
+        found = manifest["batch_id"]
+        assert isinstance(found, str)
+        batch_id = found
+    return batch_id, kept
+
+
+def _assert_batch_complete(out: Path, kept: Mapping[Path, bytes], cells: int) -> None:
+    done = [path for path in out.iterdir() if path.is_dir()]
+    assert len(done) == cells
+    seen: set[tuple[object, object, object]] = set()
+    for path in done:
+        manifest = _read_manifest(path / "manifest.json")
+        assert manifest["status"] == "finished"
+        assert manifest["termination_reason"] == "max_cycles"
+        seen.add((manifest["seed_id"], manifest["condition"], manifest["repeat_index"]))
+    assert len(seen) == cells
+    for path, raw in kept.items():
+        assert (path / "chain.jsonl").read_bytes() == raw
+
+
+def test_credit_stop_resumes_the_batch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    corpus = _study_file(tmp_path)
+    out = tmp_path / "out"
+    panel = 1
+    steps = 2
+    repeats = 2
+    per_cell = planned_calls("identity", steps, panel)
+    assert planned_calls("paraphrase", steps, panel) == per_cell
+    cells = 2 * 2 * repeats
+    complete = 2
+    opening = planned_calls("identity", 1, panel)
+    state = _CreditState()
+    _install_transport(
+        monkeypatch,
+        tmp_path,
+        _credit_factory(state, per_cell * complete + opening),
+    )
+    command = [
+        "--seeds",
+        str(corpus),
+        "--split",
+        "study",
+        "--condition",
+        "identity",
+        "--condition",
+        "paraphrase",
+        "--repeats",
+        str(repeats),
+        "--max-cycles",
+        str(steps),
+        "--judge-samples",
+        "1",
+        "--out",
+        str(out),
+        "--quiet",
+    ]
+    assert main(["--dry-run", *command]) == 0
+    preview = capsys.readouterr().out
+    assert f"runs: {cells}" in preview
+    assert f"calls: {cells * per_cell}" in preview
+    assert main(command) == _EXIT_BUDGET
+    stopped = capsys.readouterr()
+    assert "Traceback" not in stopped.err
+    assert stopped.err.count("insufficient_credits") == 1
+    assert f"insufficient_credits at step 1 of {steps}: results saved to " in (
+        stopped.err
+    )
+    runs = [path for path in out.iterdir() if path.is_dir()]
+    assert len(runs) == complete + 1
+    batch_id, kept = _credit_snapshot(out)
+    assert len(kept) == complete
+    assert batch_id != ""
+    assert main(["--resume", batch_id, "--dry-run", "--out", str(out)]) == 0
+    remaining = capsys.readouterr().out
+    left = cells - complete
+    assert f"runs: {left}" in remaining
+    assert f"calls: {left * per_cell}" in remaining
+    state.fail = False
+    assert main(["run", "--resume", batch_id, "--out", str(out), "--quiet"]) == 0
+    _assert_batch_complete(out, kept, cells)
 
 
 def test_generation_failure_exits_1(
@@ -2190,7 +2376,32 @@ def test_threshold_exits_0(
         )
         == 0
     )
-    assert "threshold" in capsys.readouterr().out
+    assert "threshold at step 2 of 30: results saved to " in capsys.readouterr().out
+    _install_client(
+        monkeypatch,
+        tmp_path,
+        _Scripted(judge_text='{"rationale": "low", "score": 1, "anchored": 1}'),
+    )
+    low = tmp_path / "low"
+    assert (
+        main(
+            [
+                "--start",
+                _SEED,
+                "--condition",
+                "identity",
+                "--max-cycles",
+                "1",
+                "--quiet",
+                "--out",
+                str(low),
+            ]
+        )
+        == 0
+    )
+    assert "max_cycles at step 1 of 1, threshold at step 1: results saved to " in (
+        capsys.readouterr().out
+    )
 
 
 def test_yes_required_when_the_estimate_is_high(

@@ -95,6 +95,10 @@ class CallDeadlineError(Exception):
     pass
 
 
+class InsufficientCreditsError(Exception):
+    pass
+
+
 @dataclass(frozen=True)
 class ModelRecord:
     model_id: str
@@ -294,6 +298,7 @@ class OpenRouterClient:
         Raises:
             GenerationError: The reply was empty, truncated, or blocked twice.
             CallDeadlineError: The call exceeded its wall-clock deadline.
+            InsufficientCreditsError: A credit refusal outlasted the waits.
         """
         waits = 0
         call = _Outbound(
@@ -312,6 +317,8 @@ class OpenRouterClient:
             except APIStatusError as exc:
                 limit = _wait_limit(exc.status_code)
                 if limit is None or waits >= limit:
+                    if exc.status_code == _CREDIT_STATUS:
+                        raise InsufficientCreditsError(str(exc)) from exc
                     raise
                 waits += 1
                 time.sleep(_pause_seconds(exc))
