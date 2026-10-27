@@ -19,6 +19,7 @@ from datetime import datetime, tzinfo
 from importlib.resources import files
 from pathlib import Path
 from types import TracebackType
+from typing import get_args
 
 import httpx2
 import pytest
@@ -85,6 +86,7 @@ from echochain.persistence import (
     ManifestDesign,
     Recorder,
     StepRecord,
+    TerminationReason,
     mk_exp_dir,
     running_manifest,
 )
@@ -2759,3 +2761,257 @@ def test_cassette_replays_a_shielded_prompt() -> None:
     assert parsed.anchored == recorded_anchor
     assert completion.sampling_seed == sent_seed
     assert completion.seed_honored is True
+
+
+_POLICY = (
+    "While echoChain is 0.x, an incompatible change to the contract bumps "
+    "the minor version and is listed under Changed or Removed in "
+    "CHANGELOG.md, and any other change bumps the patch version."
+)
+_REASONS = (
+    "threshold",
+    "max_cycles",
+    "generation_error",
+    "judge_error",
+    "budget_exceeded",
+    "interrupted",
+    "insufficient_credits",
+)
+_SCHEMA_SHA256 = {
+    "manifest.schema.json": (
+        "a9feffc29e2ff5cee9eb791cadf1a04317ac2965ac836af8255de441a7f7713a"
+    ),
+    "row.schema.json": (
+        "ab28120dff3677d32d3776dd2d09b8201655cba27708d7f75ec524e191a97af2"
+    ),
+}
+
+_HELP: tuple[tuple[tuple[str, ...], str], ...] = (
+    (
+        ("--help",),
+        """\
+usage: echochain [-h] [--version] [--quiet] [--verbose] [--config CONFIG]
+                 {run,config,export,analyze,models} ...
+
+Measure information degradation through LLM telephone.
+
+positional arguments:
+  {run,config,export,analyze,models}
+    run                 Run one seed or a batch.
+    config              Show the resolved configuration.
+    export              Write CSV derived from a run's JSONL.
+    analyze             Summarize claim fidelity, baseline curves, survival,
+                        and log-rank tests.
+    models              Check configured models against the catalog.
+
+options:
+  -h, --help            show this help message and exit
+  --version             show program's version number and exit
+  --quiet               Hide step progress.
+  --verbose             Print token counts and cost with each step.
+  --config CONFIG       Experiment TOML file.
+
+examples:
+  echochain --start TEXT --out runs --budget 1
+  echochain run --seeds seeds/v1.toml --split study
+  echochain run --resume RUN_ID
+  echochain run --resume BATCH_ID --out runs
+
+exit codes:
+  0    completed, the threshold or the cycle cap was reached
+  1    runtime or API failure
+  2    usage or configuration error
+  3    budget exceeded or insufficient credits
+  130  interrupted
+""",
+    ),
+    (
+        ("run", "--help"),
+        """\
+usage: echochain run [-h] [--start START] [--seed SEED] [--seeds SEEDS]
+                     [--preregistration PREREGISTRATION] [--corpus CORPUS]
+                     [--split {study,held-out}] [--condition CONDITION]
+                     [--repeats REPEATS] [--sampling-seed SAMPLING_SEED]
+                     [--top-p TOP_P] [--dry-run] [--yes] [--out OUT]
+                     [--budget BUDGET] [--model MODELS] [--judge JUDGE]
+                     [--judge-samples JUDGE_SAMPLES]
+                     [--judge-temperature JUDGE_TEMPERATURE]
+                     [--temperature TEMPERATURE] [--max-cycles MAX_CYCLES]
+                     [--max-tokens MAX_TOKENS] [--stop-score STOP_SCORE]
+                     [--stop-consecutive STOP_CONSECUTIVE]
+                     [--score-min SCORE_MIN] [--score-max SCORE_MAX]
+                     [--judge-error-numerator JUDGE_ERROR_NUMERATOR]
+                     [--judge-error-denominator JUDGE_ERROR_DENOMINATOR]
+                     [--deadline DEADLINE_SECONDS] [--base-url BASE_URL]
+                     [--http-referer HTTP_REFERER] [--title TITLE]
+                     [--require REQUIRED_PARAMETERS]
+                     [--rubric-version RUBRIC_VERSION]
+                     [--confirm-above CONFIRM_ABOVE_USD] [--provider PROVIDER]
+                     [--resume RESUME]
+
+options:
+  -h, --help            show this help message and exit
+  --start START         Seed answer text.
+  --seed SEED           Seed id from the corpus.
+  --seeds SEEDS         Seed corpus TOML.
+  --preregistration PREREGISTRATION
+                        Pre-registration file hashed onto the manifest.
+  --corpus CORPUS       Seed corpus TOML.
+  --split {study,held-out}
+                        Corpus split.
+  --condition CONDITION
+                        Condition name. Repeat to run several. 'all' runs the
+                        controls.
+  --repeats REPEATS     Repetitions of each pair.
+  --sampling-seed SAMPLING_SEED
+                        Base sampling seed.
+  --top-p TOP_P         Nucleus sampling cutoff.
+  --dry-run             Print the cost bound.
+  --yes                 Start a run over the cap.
+  --out OUT             Directory that receives run folders.
+  --budget BUDGET       Stop at this many USD.
+  --model MODELS        Rotating model.
+  --judge JUDGE         Judge model.
+  --judge-samples JUDGE_SAMPLES
+                        Samples per judge.
+  --judge-temperature JUDGE_TEMPERATURE
+                        Judge temperature.
+  --temperature TEMPERATURE
+                        Transform temperature.
+  --max-cycles MAX_CYCLES
+                        Planned steps in one run.
+  --max-tokens MAX_TOKENS
+                        Completion token cap.
+  --stop-score STOP_SCORE
+                        Low fidelity threshold.
+  --stop-consecutive STOP_CONSECUTIVE
+                        Low scores that stop a run.
+  --score-min SCORE_MIN
+                        Lowest accepted judge score.
+  --score-max SCORE_MAX
+                        Highest accepted judge score.
+  --judge-error-numerator JUDGE_ERROR_NUMERATOR
+                        Judge error numerator.
+  --judge-error-denominator JUDGE_ERROR_DENOMINATOR
+                        Judge error denominator.
+  --deadline DEADLINE_SECONDS
+                        Seconds allowed for one call.
+  --base-url BASE_URL   OpenRouter API base URL.
+  --http-referer HTTP_REFERER
+                        HTTP-Referer header.
+  --title TITLE         X-Title header.
+  --require REQUIRED_PARAMETERS
+                        Parameter a model must advertise.
+  --rubric-version RUBRIC_VERSION
+                        Rubric version stored on the run.
+  --confirm-above CONFIRM_ABOVE_USD
+                        USD estimate that requires --yes.
+  --provider PROVIDER   Pin as model=provider,provider|true.
+  --resume RESUME       Continue a run id, a run directory, or a batch id.
+
+examples:
+  echochain --start TEXT --out runs --budget 1
+  echochain run --seeds seeds/v1.toml --split study
+  echochain run --resume RUN_ID
+  echochain run --resume BATCH_ID --out runs
+
+exit codes:
+  0    completed, the threshold or the cycle cap was reached
+  1    runtime or API failure
+  2    usage or configuration error
+  3    budget exceeded or insufficient credits
+  130  interrupted
+""",
+    ),
+    (
+        ("config", "--help"),
+        """\
+usage: echochain config [-h] {show} ...
+
+positional arguments:
+  {show}
+    show      Print the resolved configuration.
+
+options:
+  -h, --help  show this help message and exit
+""",
+    ),
+    (
+        ("config", "show", "--help"),
+        """\
+usage: echochain config show [-h]
+
+options:
+  -h, --help  show this help message and exit
+""",
+    ),
+    (
+        ("export", "--help"),
+        """\
+usage: echochain export [-h] [--format {csv}] RUN
+
+positional arguments:
+  RUN
+
+options:
+  -h, --help      show this help message and exit
+  --format {csv}
+""",
+    ),
+    (
+        ("analyze", "--help"),
+        """\
+usage: echochain analyze [-h] [--out OUT] RUN [RUN ...]
+
+positional arguments:
+  RUN
+
+options:
+  -h, --help  show this help message and exit
+  --out OUT   Directory for tables and figures.
+""",
+    ),
+    (
+        ("models", "--help"),
+        """\
+usage: echochain models [-h]
+
+options:
+  -h, --help  show this help message and exit
+""",
+    ),
+)
+
+
+def _termination_enum() -> tuple[object, ...]:
+    properties = _schema("manifest.schema.json")["properties"]
+    if not isinstance(properties, dict):
+        raise TypeError("properties is not an object")
+    field = properties["termination_reason"]
+    if not isinstance(field, dict):
+        raise TypeError("termination_reason is not an object")
+    listed = field["enum"]
+    if not isinstance(listed, list):
+        raise TypeError("termination_reason enum is not a list")
+    return tuple(listed)
+
+
+def test_public_contract(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("COLUMNS", "80")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    readme = (_repo_root() / "README.md").read_text(encoding="utf-8")
+    assert _POLICY in readme, _POLICY
+    for argv, expected in _HELP:
+        with pytest.raises(SystemExit) as caught:
+            main(list(argv))
+        assert caught.value.code == 0, _POLICY
+        assert capsys.readouterr().out == expected, _POLICY
+    root = _repo_root()
+    for name, digest in _SCHEMA_SHA256.items():
+        actual = hashlib.sha256((root / "schemas" / name).read_bytes()).hexdigest()
+        assert actual == digest, _POLICY
+    assert get_args(TerminationReason) == _REASONS, _POLICY
+    assert _termination_enum() == (*_REASONS, None), _POLICY
