@@ -1,0 +1,12 @@
+cff-version: 1.2.0
+message: If you use this software, please cite it using these metadata.
+title: echoChain
+type: software
+authors:
+  - given-names: Samir
+    family-names: Musali
+    email: samir.musali@gmail.com
+repository-code: https://github.com/smusali/echoChain
+license: MIT
+version: 0.1.0
+date-released: 2026-10-25

@@ -50,6 +50,10 @@ dev = [
   "build>=1,<2",
   "twine>=7,<8",
   "pip-audit>=2.9,<3",
+  "hypothesis>=6.100,<7",
+]
+baseline = [
+  "sentence-transformers>=3.4,<7",
 ]
 
 [project.scripts]
@@ -75,6 +79,8 @@ only-include = [
   "schemas",
   "seeds",
   "examples",
+  "CITATION.cff",
+  "CODE_OF_CONDUCT.md",
 ]
 
 [tool.hatch.build.targets.wheel.force-include]
@@ -114,3 +120,7 @@ show_missing = true
 python_version = "3.11"
 strict = true
 files = ["echochain", "tests"]
+
+[[tool.mypy.overrides]]
+module = "sentence_transformers.*"
+ignore_missing_imports = true

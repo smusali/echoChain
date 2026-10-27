@@ -1,0 +1,38 @@
+name: Results note
+description: Describe a finished study after the runs exist.
+title: "results: "
+labels:
+  - research
+body:
+  - type: textarea
+    id: implementation
+    attributes:
+      label: Implementation
+    validations:
+      required: true
+  - type: textarea
+    id: challenges
+    attributes:
+      label: Challenges
+    validations:
+      required: true
+  - type: textarea
+    id: decisions
+    attributes:
+      label: Design decisions
+    validations:
+      required: true
+  - type: textarea
+    id: combinations
+    attributes:
+      label: Model combinations
+      description: Which combinations degraded fastest and slowest, the average cycles to degradation, and how many runs finished.
+    validations:
+      required: true
+  - type: textarea
+    id: assistance
+    attributes:
+      label: Generative AI
+      description: Say how generative AI was used.
+    validations:
+      required: true

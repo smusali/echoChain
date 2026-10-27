@@ -1,6 +1,6 @@
 # Methodology
 
-echoChain measures how a technical statement changes as models rewrite it. This note is the measurement definition for rubric version 2. A finished run can be rebuilt from its manifest: package version, prompt template hashes, corpus hash, condition, models, temperatures, `top_p`, and `sampling_seed`.
+echoChain measures how a technical statement changes as models rewrite it. This note is the measurement definition for rubric version 2. A finished run can be rebuilt from its manifest: package version, prompt template hashes, corpus hash, condition, models, temperatures, `top_p`, `sampling_seed`, baseline model revisions, and the pre-registration hash.
 
 ## What is measured
 
@@ -9,6 +9,12 @@ The primary metric is claim fidelity. Each corpus seed has a frozen list of clai
 Every judge call also returns two holistic scores. `anchored` is a 1 to 5 score whose levels separate a preserved mechanism from a preserved topic. `score` is the existing 1 to 10 comparison. The 1 to 10 mean is the only number the stop rule reads. Question steps are scored for answerability and stay off the fidelity curves.
 
 A later answer is also judged against the previous answer, not against the question in between. The first answer leaves those fields empty. Seed-targeted samples and previous-answer samples are stored in separate lists.
+
+## Baseline
+
+Each step stores a `baseline` object that does not use the judge. On an answer step, cosine similarity and entailment use pinned models: embedding `sentence-transformers/all-MiniLM-L6-v2` at revision `1110a243fdf4706b3f48f1d95db1a4f5529b4d41`, and NLI `cross-encoder/nli-MiniLM2-L6-H768` at revision `b95119ce93d3e065de6214e38cd4a97b0f2f2c6d`. Forward entailment treats the reference as the premise and the answer as the hypothesis. The stored value is the entailment-class probability from the model's own label map. A lexical run leaves those neural fields null. `length_ratio` is the answer's Unicode code points divided by the seed's. An empty seed has no ratio. `technical_survival` is the share of the seed's technical tokens that occur again as whole tokens. Technical tokens are casefolded complexity expressions with internal spaces removed, digit literals, acronyms of two or more capitals, hyphenated compounds, and remaining alphabetic tokens of length at least 3 that are not in a fixed closed-class list. `generic_share` is the share of the answer's word tokens that are in that list. A question step stores the same object with every value null. The first answer leaves the previous-answer fields null.
+
+`echochain analyze` plots claim fidelity, cosine to the seed, backward entailment, technical survival, generic share, and length ratio. Previous-answer series stay in `curves.tsv`. For `generic_share` and `length_ratio`, a condition with at least three runs that have both endpoints gets an ordinary least-squares fit of the last value on the first. When the absolute slope is below 1, the report prints the slope, the strength `1 - slope`, and the position given by the intercept divided by that strength. Otherwise it prints that the fit was not estimated. Those curves are sanity checks, not extra primary endpoints.
 
 ## Conditions
 

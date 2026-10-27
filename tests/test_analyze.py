@@ -69,19 +69,37 @@ def test_agreement_matches_the_hand_values() -> None:
 
 
 def test_report_is_deterministic(tmp_path: Path) -> None:
-    first = _directory(
-        tmp_path,
-        _Case("run-a", "alpha", "s1", 1, event=1, fidelity=0.0),
-    )
-    second = _directory(
-        tmp_path,
-        _Case("run-b", "beta", None, 2, event=0, fidelity=1.0),
+    directories = (
+        _directory(
+            tmp_path,
+            _Case("run-a", "alpha", "s1", 1, event=1, fidelity=0.0, cosine=0.8),
+        ),
+        _directory(
+            tmp_path,
+            _Case("run-b", "beta", None, 2, event=0, fidelity=1.0, cosine=0.4),
+        ),
+        *(
+            _directory(
+                tmp_path,
+                _Case(
+                    f"run-g{index}",
+                    "gamma",
+                    "s3",
+                    2,
+                    event=0,
+                    fidelity=1.0,
+                    fidelities=((1, 8.0), (2, 8.0)),
+                    ends=ends,
+                ),
+            )
+            for index, ends in enumerate(((0.2, 0.5), (0.4, 0.6), (0.6, 0.7)))
+        ),
     )
     out = tmp_path / "out"
-    text = report((first, second), out=out)
+    text = report(directories, out=out)
     first_curves = (out / "curves.svg").read_bytes()
     first_survival = (out / "survival.svg").read_bytes()
-    again = report((first, second), out=out)
+    again = report(directories, out=out)
     assert (
         hashlib.sha256(text.encode()).hexdigest()
         == hashlib.sha256(again.encode()).hexdigest()
@@ -90,8 +108,12 @@ def test_report_is_deterministic(tmp_path: Path) -> None:
     assert first_survival == (out / "survival.svg").read_bytes()
     assert b"<svg" in first_curves
     assert b"<svg" in first_survival
+    assert b"cosine to the seed" in first_curves
     assert "claim_fidelity" in text
+    assert "cosine_seed" in text
     assert "run-b\tbeta\t2\t0" in text
+    assert "gamma\tgeneric_share\t0.500000\t0.500000\t0.800000" in text
+    assert "alpha\tgeneric_share\tnot estimated" in text
 
 
 def test_report_refuses_mixed_rubrics(tmp_path: Path) -> None:
@@ -219,6 +241,8 @@ class _Case:
     rubric: str = "2"
     max_cycles: int | None = None
     fidelities: tuple[tuple[int, float], ...] = ()
+    cosine: float | None = None
+    ends: tuple[float, float] | None = None
 
 
 def _directory(root: Path, case: _Case) -> Path:
@@ -236,8 +260,9 @@ def _directory(root: Path, case: _Case) -> Path:
     if case.max_cycles is not None:
         manifest["max_cycles"] = case.max_cycles
     observed = case.fidelities or ((case.time, score),)
-    rows = [
-        {
+    rows: list[dict[str, object]] = []
+    for index, (step, fidelity) in enumerate(observed):
+        row: dict[str, object] = {
             "step": step,
             "judge": {
                 "fidelity_vs_seed": fidelity,
@@ -249,8 +274,10 @@ def _directory(root: Path, case: _Case) -> Path:
                 "contradiction_rate": 0.0,
             },
         }
-        for step, fidelity in observed
-    ]
+        baseline = _baseline(case, index)
+        if baseline is not None:
+            row["baseline"] = baseline
+        rows.append(row)
     (directory / "manifest.json").write_text(
         json.dumps(manifest), encoding="utf-8", newline="\n"
     )
@@ -260,3 +287,20 @@ def _directory(root: Path, case: _Case) -> Path:
         newline="\n",
     )
     return directory
+
+
+def _baseline(case: _Case, index: int) -> dict[str, float | None] | None:
+    if case.cosine is None and case.ends is None:
+        return None
+    value = None if case.ends is None else case.ends[0 if index == 0 else 1]
+    return {
+        "cosine_seed": case.cosine,
+        "cosine_prev": None,
+        "entail_seed_forward": None,
+        "entail_seed_backward": None,
+        "entail_prev_forward": None,
+        "entail_prev_backward": None,
+        "length_ratio": value,
+        "technical_survival": None,
+        "generic_share": value,
+    }

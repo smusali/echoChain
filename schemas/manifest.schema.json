@@ -41,7 +41,9 @@
     "deadline_seconds",
     "error",
     "batch_id",
-    "repeat_index"
+    "repeat_index",
+    "baseline",
+    "preregistration_sha256"
   ],
   "properties": {
     "status": {"enum": ["running", "finished", "failed"]},
@@ -202,6 +204,28 @@
     "repeat_index": {
       "anyOf": [
         {"type": "integer", "minimum": 0},
+        {"type": "null"}
+      ]
+    },
+    "baseline": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "embedding_model",
+        "embedding_revision",
+        "nli_model",
+        "nli_revision"
+      ],
+      "properties": {
+        "embedding_model": {"type": ["string", "null"]},
+        "embedding_revision": {"type": ["string", "null"]},
+        "nli_model": {"type": ["string", "null"]},
+        "nli_revision": {"type": ["string", "null"]}
+      }
+    },
+    "preregistration_sha256": {
+      "anyOf": [
+        {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         {"type": "null"}
       ]
     }

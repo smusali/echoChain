@@ -15,6 +15,7 @@ from types import TracebackType
 from typing import Literal, TypedDict
 
 from echochain import __version__
+from echochain.baseline import BaselineModels, BaselineRecord, empty_models
 from echochain.config import (
     CALL_DEADLINE_SECONDS,
     JUDGE_MODEL,
@@ -151,6 +152,7 @@ class StepRecord(TypedDict):
     cost: float
     generation_id: str
     judge: JudgeRecord
+    baseline: BaselineRecord
     timestamp: str
 
 
@@ -235,6 +237,8 @@ class Manifest(TypedDict):
     error: str | None
     batch_id: str | None
     repeat_index: int | None
+    baseline: BaselineModels
+    preregistration_sha256: str | None
 
 
 @dataclass(frozen=True)
@@ -260,6 +264,8 @@ class ManifestDesign:
     top_p: float | None = None
     batch_id: str | None = None
     repeat_index: int | None = None
+    baseline: BaselineModels | None = None
+    preregistration_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -409,6 +415,8 @@ def running_manifest(
         "error": None,
         "batch_id": chosen.batch_id,
         "repeat_index": chosen.repeat_index,
+        "baseline": empty_models() if chosen.baseline is None else chosen.baseline,
+        "preregistration_sha256": chosen.preregistration_sha256,
     }
 
 
@@ -775,7 +783,38 @@ def _redact_row(record: StepRecord) -> StepRecord:
         "cost": record["cost"],
         "generation_id": redact(record["generation_id"]),
         "judge": judge,
+        "baseline": _copy_baseline(record["baseline"]),
         "timestamp": record["timestamp"],
+    }
+
+
+def _copy_baseline(record: BaselineRecord) -> BaselineRecord:
+    return {
+        "cosine_seed": record["cosine_seed"],
+        "cosine_prev": record["cosine_prev"],
+        "entail_seed_forward": record["entail_seed_forward"],
+        "entail_seed_backward": record["entail_seed_backward"],
+        "entail_prev_forward": record["entail_prev_forward"],
+        "entail_prev_backward": record["entail_prev_backward"],
+        "length_ratio": record["length_ratio"],
+        "technical_survival": record["technical_survival"],
+        "generic_share": record["generic_share"],
+    }
+
+
+def _baseline_models(value: object) -> BaselineModels:
+    if value is None:
+        return empty_models()
+    raw = _mapping(value, "baseline")
+    return {
+        "embedding_model": _optional_string(
+            raw.get("embedding_model"), "embedding_model"
+        ),
+        "embedding_revision": _optional_string(
+            raw.get("embedding_revision"), "embedding_revision"
+        ),
+        "nli_model": _optional_string(raw.get("nli_model"), "nli_model"),
+        "nli_revision": _optional_string(raw.get("nli_revision"), "nli_revision"),
     }
 
 
@@ -981,6 +1020,10 @@ def _manifest(raw: Mapping[str, object]) -> Manifest:
         "error": _optional_string(raw.get("error"), "error"),
         "batch_id": _optional_string(raw.get("batch_id"), "batch_id"),
         "repeat_index": _optional_index(raw.get("repeat_index")),
+        "baseline": _baseline_models(raw.get("baseline")),
+        "preregistration_sha256": _optional_string(
+            raw.get("preregistration_sha256"), "preregistration_sha256"
+        ),
     }
 
 

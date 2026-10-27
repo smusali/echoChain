@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import importlib.util
 import json
 import logging
 import os
@@ -16,6 +17,12 @@ from pathlib import Path
 from echochain import __version__
 from echochain import client as client_mod
 from echochain.analyze import AnalyzeError, degradation_step, report
+from echochain.baseline import (
+    BaselineUnavailable,
+    TextScorer,
+    lexical_scorer,
+    load_scorer,
+)
 from echochain.client import ModelRecord
 from echochain.config import (
     ConfigError,
@@ -60,6 +67,7 @@ from echochain.persistence import (
     prepare_resume,
     read_manifest,
     running_manifest,
+    sha256_text,
 )
 from echochain.prompts import (
     ANSWERABILITY_USER_TMPL,
@@ -206,7 +214,8 @@ def _parser() -> argparse.ArgumentParser:
     export.add_argument("directory", type=Path, metavar="RUN")
     export.add_argument("--format", default="csv", choices=("csv",))
     analyze = sub.add_parser(
-        "analyze", help="Summarize claim fidelity, survival, and log-rank tests."
+        "analyze",
+        help="Summarize claim fidelity, baseline curves, survival, and log-rank tests.",
     )
     analyze.add_argument("directory", nargs="+", type=Path, metavar="RUN")
     analyze.add_argument("--out", type=Path, help="Directory for tables and figures.")
@@ -218,6 +227,11 @@ def _add_run_flags(run: argparse.ArgumentParser) -> None:
     run.add_argument("--start", help="Seed answer text.")
     run.add_argument("--seed", help="Seed id from the corpus.")
     run.add_argument("--seeds", type=Path, help="Seed corpus TOML.")
+    run.add_argument(
+        "--preregistration",
+        type=Path,
+        help="Pre-registration file hashed onto the manifest.",
+    )
     run.add_argument("--corpus", type=Path, help="Seed corpus TOML.")
     run.add_argument("--split", choices=("study", "held-out"), help="Corpus split.")
     run.add_argument(
@@ -327,6 +341,7 @@ def _overrides(args: argparse.Namespace) -> dict[str, object]:
         put("seeds", args.seeds)
     elif args.corpus is not None:
         put("seeds", args.corpus)
+    put("preregistration", args.preregistration)
     put("condition", args.condition)
     put("repeats", args.repeats)
     put("sampling_seed", args.sampling_seed)
@@ -360,6 +375,8 @@ def _overrides(args: argparse.Namespace) -> dict[str, object]:
 
 def _run(args: argparse.Namespace, settings: Settings) -> int:
     progress = None if args.quiet else _on_step(verbose=args.verbose)
+    _preregistration_hash(settings.preregistration)
+    _require_baseline(settings)
     if args.resume:
         return _resume(args, settings, progress)
     batch = _batch(settings)
@@ -367,6 +384,35 @@ def _run(args: argparse.Namespace, settings: Settings) -> int:
     if args.dry_run:
         return _dry_run(cells, settings)
     return _execute(batch, cells, settings, yes=args.yes, progress=progress)
+
+
+def _preregistration_hash(path: Path | None) -> str | None:
+    if path is None:
+        return None
+    if not path.is_file():
+        raise ConfigError(f"pre-registration was not found: {path}")
+    return sha256_text(path.read_text(encoding="utf-8"))
+
+
+def _require_baseline(settings: Settings) -> None:
+    if settings.preregistration is None:
+        return
+    if importlib.util.find_spec("sentence_transformers") is None:
+        raise UsageError(
+            "baseline models are not installed; install the baseline extra"
+        )
+
+
+def _scorer(settings: Settings, manifest: Manifest | None = None) -> TextScorer:
+    required = settings.preregistration is not None
+    if manifest is not None and manifest["baseline"]["embedding_model"] is not None:
+        required = True
+    if not required:
+        return lexical_scorer()
+    try:
+        return load_scorer()
+    except BaselineUnavailable as exc:
+        raise UsageError(str(exc)) from exc
 
 
 def _batch(settings: Settings) -> Batch:
@@ -448,8 +494,13 @@ def _execute(
     yes: bool,
     progress: Callable[[StepNote], None] | None,
 ) -> int:
-    api_key = load_api_key()
-    catalog = client_mod.fetch_catalog(api_key, settings=settings)
+    live = _Live(
+        load_api_key(),
+        progress,
+        _scorer(settings),
+        _preregistration_hash(settings.preregistration),
+    )
+    catalog = client_mod.fetch_catalog(live.api_key, settings=settings)
     if _confirm(cells, settings, catalog, yes=yes):
         return _EXIT_CONFIG
     client_mod.check_models(
@@ -460,7 +511,7 @@ def _execute(
     batch_id = str(uuid.uuid4())
     _write_batch(settings.out / f"{batch_id}{_BATCH_SUFFIX}", batch_id, batch)
     for cell in cells:
-        directory, reason = _one(cell, settings, api_key, progress, batch_id)
+        directory, reason = _one(cell, settings, live, batch_id)
         code = _report(directory, reason)
         if code != 0:
             return code
@@ -485,11 +536,18 @@ def _confirm(
     return True
 
 
+@dataclass(frozen=True)
+class _Live:
+    api_key: str
+    progress: Callable[[StepNote], None] | None
+    scorer: TextScorer
+    preregistration_sha256: str | None
+
+
 def _one(
     cell: Cell,
     settings: Settings,
-    api_key: str,
-    progress: Callable[[StepNote], None] | None,
+    live: _Live,
     batch_id: str,
 ) -> tuple[Path, TerminationReason]:
     seed = cell.seed
@@ -513,7 +571,7 @@ def _one(
         score_max=settings.score_max,
         judge_error_numerator=settings.judge_error_numerator,
         judge_error_denominator=settings.judge_error_denominator,
-        on_step=progress,
+        on_step=live.progress,
         claims=seed.claims,
         sampling_seed=base,
         top_p=settings.top_p,
@@ -524,12 +582,16 @@ def _one(
         slug=allocated.slug,
         seed=seed.text,
         budget=spec.budget,
-        design=_design(spec, settings, batch_id, cell.repeat_index),
+        design=replace(
+            _design(spec, settings, batch_id, cell.repeat_index),
+            baseline=live.scorer.models(),
+            preregistration_sha256=live.preregistration_sha256,
+        ),
     )
     reason = _drive(
         _Attempt(allocated.directory, manifest, seed.text, spec),
-        api_key,
         settings,
+        live,
     )
     return allocated.directory, reason
 
@@ -543,9 +605,9 @@ class _Attempt:
     prior: Sequence[Mapping[str, object]] | None = None
 
 
-def _drive(attempt: _Attempt, api_key: str, settings: Settings) -> TerminationReason:
+def _drive(attempt: _Attempt, settings: Settings, live: _Live) -> TerminationReason:
     with Recorder(attempt.directory, attempt.manifest, prior=attempt.prior) as recorder:
-        with client_mod.OpenRouterClient(api_key, settings=settings) as client:
+        with client_mod.OpenRouterClient(live.api_key, settings=settings) as client:
             try:
                 reason = cycle(
                     attempt.seed,
@@ -553,6 +615,7 @@ def _drive(attempt: _Attempt, api_key: str, settings: Settings) -> TerminationRe
                     client,
                     run_id=attempt.manifest["run_id"],
                     spec=attempt.spec,
+                    scorer=live.scorer,
                 )
             except KeyboardInterrupt:
                 recorder.finish("interrupted")
@@ -614,8 +677,13 @@ def _resume(
     directory = _find_run(str(args.resume), settings.out)
     plan = prepare_resume(directory)
     tuned = _tune(settings, plan.manifest)
-    api_key = load_api_key()
-    _check(tuned, api_key)
+    live = _Live(
+        load_api_key(),
+        progress,
+        _scorer(tuned, plan.manifest),
+        None,
+    )
+    _check(tuned, live.api_key)
     reason = _drive(
         _Attempt(
             directory,
@@ -624,8 +692,8 @@ def _resume(
             _resume_spec(plan, tuned, progress),
             plan.rows,
         ),
-        api_key,
         tuned,
+        live,
     )
     return _report(directory, reason)
 
@@ -784,8 +852,13 @@ def _resume_batch(
         return _dry_run(chosen, tuned)
     if not chosen:
         return 0
-    api_key = load_api_key()
-    catalog = client_mod.fetch_catalog(api_key, settings=tuned)
+    live = _Live(
+        load_api_key(),
+        progress,
+        _scorer(tuned),
+        _preregistration_hash(tuned.preregistration),
+    )
+    catalog = client_mod.fetch_catalog(live.api_key, settings=tuned)
     if _confirm(chosen, tuned, catalog, yes=args.yes):
         return _EXIT_CONFIG
     client_mod.check_models(
@@ -797,11 +870,9 @@ def _resume_batch(
         key = (cell.seed.seed_id, cell.condition.name, cell.repeat_index)
         found = continuations.get(key)
         if found is None:
-            directory, reason = _one(cell, tuned, api_key, progress, plan.batch_id)
+            directory, reason = _one(cell, tuned, live, plan.batch_id)
         else:
-            directory, reason = _continue(
-                found, cell.seed.text, tuned, api_key, progress
-            )
+            directory, reason = _continue(found, cell.seed.text, tuned, live)
         code = _report(directory, reason)
         if code != 0:
             return code
@@ -824,8 +895,7 @@ def _continue(
     directory: Path,
     seed: str,
     settings: Settings,
-    api_key: str,
-    progress: Callable[[StepNote], None] | None,
+    live: _Live,
 ) -> tuple[Path, TerminationReason]:
     plan = prepare_resume(directory, seed)
     tuned = _tune(settings, plan.manifest)
@@ -834,11 +904,11 @@ def _continue(
             directory,
             plan.manifest,
             plan.seed,
-            _resume_spec(plan, tuned, progress),
+            _resume_spec(plan, tuned, live.progress),
             plan.rows or None,
         ),
-        api_key,
         tuned,
+        live,
     )
     return directory, reason
 
