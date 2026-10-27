@@ -1,13 +1,10 @@
-## Summary
+# Pull request
 
-## Regression test
+## Change
 
-Which offline test covers this change?
+## Tests
 
-## Manifest schema
+## Docs
 
-Did `schemas/manifest.schema.json` change?
-
-## Generative AI
-
-Did generative AI help with this change? Say what it did.
+- [ ] Tests cover the change.
+- [ ] The CLI help, schemas, and docs/USAGE.md name the same flags.

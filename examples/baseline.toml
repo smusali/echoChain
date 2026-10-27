@@ -1,0 +1,3 @@
+seed = "redis-epoll"
+baseline = "neural"
+max_cycles = 1

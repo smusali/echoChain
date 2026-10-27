@@ -1,129 +1,323 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "type": "object",
-  "additionalProperties": false,
-  "required": [
-    "run_id",
-    "step",
-    "phase",
-    "condition",
-    "schedule",
-    "score_kind",
-    "requested_model",
-    "served_model",
-    "provider",
-    "input_text",
-    "prompt_sha256",
-    "output_text",
-    "finish_reason",
-    "parameters",
-    "latency_seconds",
-    "prompt_tokens",
-    "completion_tokens",
-    "cost",
-    "generation_id",
-    "judge",
-    "baseline",
-    "timestamp"
-  ],
   "$defs": {
-    "verdict": {
-      "type": "object",
+    "BaselineMetrics": {
       "additionalProperties": false,
-      "required": ["id", "verdict"],
       "properties": {
-        "id": {"type": "string"},
-        "verdict": {
-          "enum": ["supported", "contradicted", "not_mentioned"]
+        "cosine_prev": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Cosine Prev"
+        },
+        "cosine_seed": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Cosine Seed"
+        },
+        "entail_prev_backward": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Entail Prev Backward"
+        },
+        "entail_prev_forward": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Entail Prev Forward"
+        },
+        "entail_seed_backward": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Entail Seed Backward"
+        },
+        "entail_seed_forward": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Entail Seed Forward"
+        },
+        "generic_share": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Generic Share"
+        },
+        "length_ratio": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Length Ratio"
+        },
+        "technical_survival": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Technical Survival"
         }
-      }
-    },
-    "sample": {
-      "type": "object",
-      "additionalProperties": false,
+      },
       "required": [
-        "score",
-        "anchored",
-        "verdicts",
-        "error",
-        "prompt_tokens",
-        "completion_tokens",
-        "cost",
-        "generation_id",
-        "requested_model",
-        "served_model",
-        "provider",
-        "finish_reason",
-        "seed",
-        "top_p",
-        "seed_honored"
+        "cosine_seed",
+        "cosine_prev",
+        "entail_seed_forward",
+        "entail_seed_backward",
+        "entail_prev_forward",
+        "entail_prev_backward",
+        "length_ratio",
+        "technical_survival",
+        "generic_share"
       ],
-      "properties": {
-        "score": {"type": ["integer", "null"]},
-        "anchored": {"type": ["integer", "null"]},
-        "verdicts": {
-          "type": "array",
-          "items": {"$ref": "#/$defs/verdict"}
-        },
-        "error": {"type": ["string", "null"]},
-        "prompt_tokens": {"type": "integer", "minimum": 0},
-        "completion_tokens": {"type": "integer", "minimum": 0},
-        "cost": {"type": "number", "minimum": 0},
-        "generation_id": {"type": "string"},
-        "requested_model": {"type": "string"},
-        "served_model": {"type": "string"},
-        "provider": {"type": ["string", "null"]},
-        "finish_reason": {"type": "string"},
-        "seed": {
-          "anyOf": [
-            {"type": "integer", "minimum": 1},
-            {"type": "null"}
-          ]
-        },
-        "top_p": {"type": "number", "minimum": 0, "maximum": 1},
-        "seed_honored": {"type": ["boolean", "null"]}
-      }
-    }
-  },
-  "properties": {
-    "run_id": {"type": "string", "format": "uuid"},
-    "step": {"type": "integer", "minimum": 1},
-    "phase": {"enum": ["a2q", "q2a", "identity", "paraphrase"]},
-    "condition": {"type": "string"},
-    "schedule": {"type": "string"},
-    "score_kind": {"enum": ["fidelity", "answerability"]},
-    "requested_model": {"type": "string"},
-    "served_model": {"type": "string"},
-    "provider": {"type": ["string", "null"]},
-    "input_text": {"type": "string"},
-    "prompt_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-    "output_text": {"type": "string"},
-    "finish_reason": {"type": "string"},
-    "parameters": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["temperature", "max_tokens", "top_p", "seed", "seed_honored"],
-      "properties": {
-        "temperature": {"type": "number"},
-        "max_tokens": {"type": "integer"},
-        "top_p": {"type": "number", "minimum": 0, "maximum": 1},
-        "seed": {
-          "anyOf": [
-            {"type": "integer", "minimum": 1},
-            {"type": "null"}
-          ]
-        },
-        "seed_honored": {"type": ["boolean", "null"]}
-      }
+      "title": "BaselineMetrics",
+      "type": "object"
     },
-    "latency_seconds": {"type": "number", "minimum": 0},
-    "prompt_tokens": {"type": "integer", "minimum": 0},
-    "completion_tokens": {"type": "integer", "minimum": 0},
-    "cost": {"type": "number", "minimum": 0},
-    "generation_id": {"type": "string"},
-    "judge": {
-      "type": "object",
+    "JudgeBlock": {
       "additionalProperties": false,
+      "properties": {
+        "anchored": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Anchored"
+        },
+        "anchored_spread": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Anchored Spread"
+        },
+        "anchored_vs_prev": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Anchored Vs Prev"
+        },
+        "answerability": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Answerability"
+        },
+        "answerability_anchored": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Answerability Anchored"
+        },
+        "claim_contradicted": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Claim Contradicted"
+        },
+        "claim_fidelity": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Claim Fidelity"
+        },
+        "claim_supported": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Claim Supported"
+        },
+        "claim_total": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Claim Total"
+        },
+        "claims": {
+          "items": {
+            "$ref": "#/$defs/VerdictRecord"
+          },
+          "title": "Claims",
+          "type": "array"
+        },
+        "contradiction_rate": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Contradiction Rate"
+        },
+        "errors": {
+          "title": "Errors",
+          "type": "integer"
+        },
+        "fidelity_spread": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Fidelity Spread"
+        },
+        "fidelity_vs_prev": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Fidelity Vs Prev"
+        },
+        "fidelity_vs_seed": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Fidelity Vs Seed"
+        },
+        "prev_claim_fidelity": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Prev Claim Fidelity"
+        },
+        "prev_claims": {
+          "items": {
+            "$ref": "#/$defs/VerdictRecord"
+          },
+          "title": "Prev Claims",
+          "type": "array"
+        },
+        "prev_contradiction_rate": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Prev Contradiction Rate"
+        },
+        "prev_samples": {
+          "items": {
+            "$ref": "#/$defs/Sample"
+          },
+          "title": "Prev Samples",
+          "type": "array"
+        },
+        "samples": {
+          "items": {
+            "$ref": "#/$defs/Sample"
+          },
+          "title": "Samples",
+          "type": "array"
+        }
+      },
       "required": [
         "samples",
         "prev_samples",
@@ -146,67 +340,344 @@
         "prev_claim_fidelity",
         "prev_contradiction_rate"
       ],
-      "properties": {
-        "samples": {
-          "type": "array",
-          "items": {"$ref": "#/$defs/sample"}
-        },
-        "prev_samples": {
-          "type": "array",
-          "items": {"$ref": "#/$defs/sample"}
-        },
-        "errors": {"type": "integer", "minimum": 0},
-        "fidelity_vs_seed": {"type": ["number", "null"]},
-        "fidelity_spread": {"type": ["number", "null"]},
-        "anchored": {"type": ["number", "null"]},
-        "anchored_spread": {"type": ["number", "null"]},
-        "fidelity_vs_prev": {"type": ["number", "null"]},
-        "anchored_vs_prev": {"type": ["number", "null"]},
-        "answerability": {"type": ["number", "null"]},
-        "answerability_anchored": {"type": ["number", "null"]},
-        "claims": {
-          "type": "array",
-          "items": {"$ref": "#/$defs/verdict"}
-        },
-        "claim_supported": {"type": ["integer", "null"]},
-        "claim_contradicted": {"type": ["integer", "null"]},
-        "claim_total": {"type": ["integer", "null"]},
-        "claim_fidelity": {"type": ["number", "null"]},
-        "contradiction_rate": {"type": ["number", "null"]},
-        "prev_claims": {
-          "type": "array",
-          "items": {"$ref": "#/$defs/verdict"}
-        },
-        "prev_claim_fidelity": {"type": ["number", "null"]},
-        "prev_contradiction_rate": {"type": ["number", "null"]}
-      }
+      "title": "JudgeBlock",
+      "type": "object"
     },
-    "baseline": {
-      "type": "object",
+    "Parameters": {
       "additionalProperties": false,
-      "required": [
-        "cosine_seed",
-        "cosine_prev",
-        "entail_seed_forward",
-        "entail_seed_backward",
-        "entail_prev_forward",
-        "entail_prev_backward",
-        "length_ratio",
-        "technical_survival",
-        "generic_share"
-      ],
       "properties": {
-        "cosine_seed": {"type": ["number", "null"]},
-        "cosine_prev": {"type": ["number", "null"]},
-        "entail_seed_forward": {"type": ["number", "null"]},
-        "entail_seed_backward": {"type": ["number", "null"]},
-        "entail_prev_forward": {"type": ["number", "null"]},
-        "entail_prev_backward": {"type": ["number", "null"]},
-        "length_ratio": {"type": ["number", "null"]},
-        "technical_survival": {"type": ["number", "null"]},
-        "generic_share": {"type": ["number", "null"]}
-      }
+        "max_tokens": {
+          "title": "Max Tokens",
+          "type": "integer"
+        },
+        "sampling_seed": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Sampling Seed"
+        },
+        "seed_honored": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Seed Honored"
+        },
+        "temperature": {
+          "title": "Temperature",
+          "type": "number"
+        },
+        "top_p": {
+          "title": "Top P",
+          "type": "number"
+        }
+      },
+      "required": [
+        "temperature",
+        "max_tokens",
+        "top_p",
+        "sampling_seed",
+        "seed_honored"
+      ],
+      "title": "Parameters",
+      "type": "object"
     },
-    "timestamp": {"type": "string", "format": "date-time"}
-  }
+    "Phase": {
+      "enum": [
+        "a2q",
+        "q2a",
+        "identity",
+        "paraphrase"
+      ],
+      "title": "Phase",
+      "type": "string"
+    },
+    "Sample": {
+      "additionalProperties": false,
+      "properties": {
+        "anchored": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Anchored"
+        },
+        "completion_tokens": {
+          "title": "Completion Tokens",
+          "type": "integer"
+        },
+        "cost": {
+          "title": "Cost",
+          "type": "number"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Error"
+        },
+        "finish_reason": {
+          "title": "Finish Reason",
+          "type": "string"
+        },
+        "generation_id": {
+          "title": "Generation Id",
+          "type": "string"
+        },
+        "prompt_tokens": {
+          "title": "Prompt Tokens",
+          "type": "integer"
+        },
+        "provider": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Provider"
+        },
+        "requested_model": {
+          "title": "Requested Model",
+          "type": "string"
+        },
+        "sampling_seed": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Sampling Seed"
+        },
+        "score": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Score"
+        },
+        "seed_honored": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Seed Honored"
+        },
+        "served_model": {
+          "title": "Served Model",
+          "type": "string"
+        },
+        "top_p": {
+          "title": "Top P",
+          "type": "number"
+        },
+        "verdicts": {
+          "items": {
+            "$ref": "#/$defs/VerdictRecord"
+          },
+          "title": "Verdicts",
+          "type": "array"
+        }
+      },
+      "required": [
+        "score",
+        "anchored",
+        "verdicts",
+        "error",
+        "prompt_tokens",
+        "completion_tokens",
+        "cost",
+        "generation_id",
+        "requested_model",
+        "served_model",
+        "provider",
+        "finish_reason",
+        "sampling_seed",
+        "top_p",
+        "seed_honored"
+      ],
+      "title": "Sample",
+      "type": "object"
+    },
+    "ScoreKind": {
+      "enum": [
+        "fidelity",
+        "answerability"
+      ],
+      "title": "ScoreKind",
+      "type": "string"
+    },
+    "VerdictName": {
+      "enum": [
+        "supported",
+        "contradicted",
+        "not_mentioned"
+      ],
+      "title": "VerdictName",
+      "type": "string"
+    },
+    "VerdictRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "verdict": {
+          "$ref": "#/$defs/VerdictName"
+        }
+      },
+      "required": [
+        "id",
+        "verdict"
+      ],
+      "title": "VerdictRecord",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "baseline": {
+      "$ref": "#/$defs/BaselineMetrics"
+    },
+    "completion_tokens": {
+      "title": "Completion Tokens",
+      "type": "integer"
+    },
+    "condition": {
+      "title": "Condition",
+      "type": "string"
+    },
+    "cost": {
+      "title": "Cost",
+      "type": "number"
+    },
+    "finish_reason": {
+      "title": "Finish Reason",
+      "type": "string"
+    },
+    "generation_id": {
+      "title": "Generation Id",
+      "type": "string"
+    },
+    "input_text": {
+      "title": "Input Text",
+      "type": "string"
+    },
+    "judge": {
+      "$ref": "#/$defs/JudgeBlock"
+    },
+    "latency_seconds": {
+      "title": "Latency Seconds",
+      "type": "number"
+    },
+    "output_text": {
+      "title": "Output Text",
+      "type": "string"
+    },
+    "parameters": {
+      "$ref": "#/$defs/Parameters"
+    },
+    "phase": {
+      "$ref": "#/$defs/Phase"
+    },
+    "prompt_tokens": {
+      "title": "Prompt Tokens",
+      "type": "integer"
+    },
+    "provider": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Provider"
+    },
+    "requested_model": {
+      "title": "Requested Model",
+      "type": "string"
+    },
+    "run_id": {
+      "title": "Run Id",
+      "type": "string"
+    },
+    "schedule": {
+      "title": "Schedule",
+      "type": "string"
+    },
+    "score_kind": {
+      "$ref": "#/$defs/ScoreKind"
+    },
+    "served_model": {
+      "title": "Served Model",
+      "type": "string"
+    },
+    "step": {
+      "title": "Step",
+      "type": "integer"
+    },
+    "timestamp": {
+      "title": "Timestamp",
+      "type": "string"
+    }
+  },
+  "required": [
+    "run_id",
+    "step",
+    "phase",
+    "condition",
+    "schedule",
+    "score_kind",
+    "requested_model",
+    "served_model",
+    "provider",
+    "input_text",
+    "output_text",
+    "finish_reason",
+    "parameters",
+    "latency_seconds",
+    "prompt_tokens",
+    "completion_tokens",
+    "cost",
+    "generation_id",
+    "judge",
+    "baseline",
+    "timestamp"
+  ],
+  "title": "Row",
+  "type": "object"
 }

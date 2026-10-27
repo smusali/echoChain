@@ -1,0 +1,4 @@
+seed = "redis-epoll"
+condition = ["alternate", "same-model"]
+repeats = 2
+max_cycles = 4

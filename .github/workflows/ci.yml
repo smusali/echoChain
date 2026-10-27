@@ -2,6 +2,7 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
 
 permissions:
@@ -9,27 +10,30 @@ permissions:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   test:
     name: test (${{ matrix.python-version }}, ${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
         python-version: ["3.11", "3.12", "3.13", "3.14", "3.15"]
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           python-version: ${{ matrix.python-version }}
           enable-cache: true
 
       - name: Install
-        run: uv sync --frozen --extra dev
+        run: uv sync --frozen --group dev --no-editable
 
       - name: Help
         run: uv run echochain --help
@@ -44,10 +48,10 @@ jobs:
         run: uv run mypy
 
       - name: Hypothesis examples
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .hypothesis
-          key: hypothesis-${{ runner.os }}-${{ matrix.python-version }}-${{ hashFiles('echochain/**/*.py', 'tests/**/*.py') }}
+          key: hypothesis-${{ runner.os }}-${{ matrix.python-version }}-${{ hashFiles('src/echochain/**/*.py', 'tests/**/*.py') }}
           restore-keys: |
             hypothesis-${{ runner.os }}-${{ matrix.python-version }}-
 
@@ -56,102 +60,55 @@ jobs:
 
   package:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - name: Reject stale names
-        run: |
-          old_repo='llm-'
-          old_repo+='telephone'
-          old_pkg='llm_'
-          old_pkg+='tel'
-          old_user='your'
-          old_user+='username'
-          old_title='LLM '
-          old_title+='Telephone'
-          other='yymss/'
-          other+="${old_repo}"
-          pattern="${old_repo}|${old_pkg}|${old_user}|${old_title}"
-          hits=$(git grep -nE "$pattern" | grep -vE '^CHANGELOG\.md:' | grep -vF "$other" || true)
-          paths=$(git ls-files | grep -E "$pattern" | grep -vE '^CHANGELOG\.md$' | grep -vF "$other" || true)
-          if [ -n "$hits" ] || [ -n "$paths" ]; then
-            printf '%s\n' "$hits" "$paths"
-            exit 1
-          fi
-
-      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           python-version: "3.11"
           enable-cache: true
 
       - name: Install
-        run: uv sync --frozen --extra dev
+        run: uv sync --frozen --group dev --no-editable
 
-      - name: Citation
-        run: uvx --from cffconvert==2.0.0 cffconvert --validate
+      - name: Names
+        run: uv run python tools/check_names.py
 
-      - name: Changelog section
-        run: uv run python tools/check_changelog.py
+      - name: Changelog
+        run: uv run python tools/changelog.py check
+
+      - name: Markdown
+        run: uv run python tools/check_markdown.py
+
+      - name: Schemas
+        run: uv run python tools/export_schemas.py --check
 
       - name: Pre-commit
         run: uv run pre-commit run --all-files
 
+      - name: Diagrams
+        run: python tools/check_mermaid.py
+
       - name: Build
-        run: |
-          uv run python -m build
-          uv run twine check --strict dist/*
-          uv run python - <<'PY'
-          import zipfile
-          from pathlib import Path
-          wheels = list(Path("dist").glob("*.whl"))
-          if len(wheels) != 1:
-              raise SystemExit(f"expected one wheel, found {wheels}")
-          names = set(zipfile.ZipFile(wheels[0]).namelist())
-          needed = [
-              "echochain/prompts/a2q.j2",
-              "echochain/prompts/q2a.j2",
-              "echochain/prompts/identity.j2",
-              "echochain/prompts/paraphrase.j2",
-              "echochain/prompts/judge_system.j2",
-              "echochain/prompts/judge_user.j2",
-              "echochain/prompts/answerability_user.j2",
-          ]
-          missing = [name for name in needed if name not in names]
-          if missing:
-              raise SystemExit(f"wheel is missing {missing}")
-          PY
+        run: uv build
 
-  pip-audit:
-    name: pip-audit
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-
-      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e
-        with:
-          python-version: "3.11"
-          enable-cache: true
-
-      - name: Install
-        run: uv sync --frozen --extra dev
-
-      - name: Audit
-        run: |
-          uv export --frozen --extra dev --no-emit-project --format requirements-txt --output-file "$RUNNER_TEMP/requirements.txt"
-          uv run pip-audit --strict --disable-pip --requirement "$RUNNER_TEMP/requirements.txt"
+      - name: Wheel
+        run: uv run python tools/check_wheel.py
 
   check:
     name: check
     if: always()
-    needs: [test, package, pip-audit]
+    needs: [test, package]
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Require green jobs
         env:
           TEST_RESULT: ${{ needs.test.result }}
           PACKAGE_RESULT: ${{ needs.package.result }}
-          PIP_AUDIT_RESULT: ${{ needs.pip-audit.result }}
         run: |
           test "$TEST_RESULT" = "success"
           test "$PACKAGE_RESULT" = "success"
-          test "$PIP_AUDIT_RESULT" = "success"

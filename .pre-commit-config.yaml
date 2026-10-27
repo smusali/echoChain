@@ -1,22 +1,59 @@
+ci:
+  autoupdate_commit_msg: "chore(deps): update pre-commit hooks"
+  autofix_commit_msg: "style: pre-commit fixes"
+  autoupdate_schedule: monthly
+
 repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-yaml
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.17.2
     hooks:
-      - id: ruff
-        args: [--fix]
+      - id: ruff-check
+        args: [--fix, --show-fixes]
       - id: ruff-format
   - repo: https://github.com/pre-commit/mirrors-mypy
     rev: v2.4.0
     hooks:
       - id: mypy
-        files: ^(echochain|tests)/
+        stages: [manual]
         pass_filenames: false
-        args: [--strict]
-        additional_dependencies:
-          - openai==3.37.0
-          - jinja2==3.1.6
-          - pytest==9.1.1
-          - pytest-socket==0.8.1
-          - jsonschema==4.26.0
-          - types-jsonschema==4.26.0.20261006
-          - hypothesis==6.170.12
+        args: []
+  - repo: https://github.com/codespell-project/codespell
+    rev: v2.4.3
+    hooks:
+      - id: codespell
+        additional_dependencies: ["tomli"]
+  - repo: https://github.com/pre-commit/pygrep-hooks
+    rev: v1.9.0
+    hooks:
+      - id: rst-backticks
+      - id: text-unicode-replacement-char
+  - repo: https://github.com/rvben/rumdl-pre-commit
+    rev: v0.3.0
+    hooks:
+      - id: rumdl
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy
+        entry: uv run mypy
+        language: system
+        pass_filenames: false
+        types: [python]
+      - id: markdown
+        name: markdown
+        entry: uv run python tools/check_markdown.py
+        language: system
+        pass_filenames: false
+        files: \.md$
+      - id: changelog
+        name: changelog
+        entry: uv run python tools/changelog.py check
+        language: system
+        pass_filenames: false
+        files: CHANGELOG\.md$

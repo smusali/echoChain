@@ -1,23 +1,453 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "type": "object",
+  "$defs": {
+    "BaselinePins": {
+      "additionalProperties": false,
+      "properties": {
+        "embedding_model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Embedding Model"
+        },
+        "embedding_revision": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Embedding Revision"
+        },
+        "nli_model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Nli Model"
+        },
+        "nli_revision": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Nli Revision"
+        }
+      },
+      "title": "BaselinePins",
+      "type": "object"
+    },
+    "ClaimRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "text"
+      ],
+      "title": "ClaimRecord",
+      "type": "object"
+    },
+    "ErrorCounts": {
+      "additionalProperties": false,
+      "properties": {
+        "generation": {
+          "title": "Generation",
+          "type": "integer"
+        },
+        "judge": {
+          "title": "Judge",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "generation",
+        "judge"
+      ],
+      "title": "ErrorCounts",
+      "type": "object"
+    },
+    "PanelMember": {
+      "additionalProperties": false,
+      "properties": {
+        "model": {
+          "title": "Model",
+          "type": "string"
+        },
+        "samples": {
+          "title": "Samples",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "model",
+        "samples"
+      ],
+      "title": "PanelMember",
+      "type": "object"
+    },
+    "ProviderUse": {
+      "additionalProperties": false,
+      "properties": {
+        "model": {
+          "title": "Model",
+          "type": "string"
+        },
+        "provider": {
+          "title": "Provider",
+          "type": "string"
+        }
+      },
+      "required": [
+        "model",
+        "provider"
+      ],
+      "title": "ProviderUse",
+      "type": "object"
+    },
+    "RunStatus": {
+      "enum": [
+        "running",
+        "finished",
+        "failed"
+      ],
+      "title": "RunStatus",
+      "type": "string"
+    },
+    "Schedule": {
+      "additionalProperties": false,
+      "properties": {
+        "models": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Models",
+          "type": "array"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "models"
+      ],
+      "title": "Schedule",
+      "type": "object"
+    },
+    "StopName": {
+      "enum": [
+        "fixed_length",
+        "consecutive_fidelity"
+      ],
+      "title": "StopName",
+      "type": "string"
+    },
+    "StopRule": {
+      "additionalProperties": false,
+      "properties": {
+        "consecutive": {
+          "title": "Consecutive",
+          "type": "integer"
+        },
+        "name": {
+          "$ref": "#/$defs/StopName"
+        },
+        "threshold": {
+          "title": "Threshold",
+          "type": "number"
+        }
+      },
+      "required": [
+        "name",
+        "threshold",
+        "consecutive"
+      ],
+      "title": "StopRule",
+      "type": "object"
+    },
+    "Temperatures": {
+      "additionalProperties": false,
+      "properties": {
+        "judge": {
+          "title": "Judge",
+          "type": "number"
+        },
+        "transform": {
+          "title": "Transform",
+          "type": "number"
+        }
+      },
+      "required": [
+        "transform",
+        "judge"
+      ],
+      "title": "Temperatures",
+      "type": "object"
+    },
+    "TerminationReason": {
+      "enum": [
+        "threshold",
+        "max_cycles",
+        "generation_error",
+        "judge_error",
+        "budget_exceeded",
+        "interrupted",
+        "insufficient_credits"
+      ],
+      "title": "TerminationReason",
+      "type": "string"
+    }
+  },
   "additionalProperties": false,
+  "properties": {
+    "baseline": {
+      "$ref": "#/$defs/BaselinePins"
+    },
+    "batch_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Batch Id"
+    },
+    "budget": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Budget"
+    },
+    "claims": {
+      "items": {
+        "$ref": "#/$defs/ClaimRecord"
+      },
+      "title": "Claims",
+      "type": "array"
+    },
+    "completion_tokens": {
+      "title": "Completion Tokens",
+      "type": "integer"
+    },
+    "condition": {
+      "title": "Condition",
+      "type": "string"
+    },
+    "cost": {
+      "title": "Cost",
+      "type": "number"
+    },
+    "deadline_seconds": {
+      "title": "Deadline Seconds",
+      "type": "number"
+    },
+    "ended_at": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Ended At"
+    },
+    "error": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Error"
+    },
+    "errors": {
+      "$ref": "#/$defs/ErrorCounts"
+    },
+    "judge_panel": {
+      "items": {
+        "$ref": "#/$defs/PanelMember"
+      },
+      "title": "Judge Panel",
+      "type": "array"
+    },
+    "max_cycles": {
+      "title": "Max Cycles",
+      "type": "integer"
+    },
+    "max_judge_error_share": {
+      "title": "Max Judge Error Share",
+      "type": "number"
+    },
+    "max_tokens": {
+      "title": "Max Tokens",
+      "type": "integer"
+    },
+    "os": {
+      "title": "Os",
+      "type": "string"
+    },
+    "prompt_tokens": {
+      "title": "Prompt Tokens",
+      "type": "integer"
+    },
+    "providers": {
+      "items": {
+        "$ref": "#/$defs/ProviderUse"
+      },
+      "title": "Providers",
+      "type": "array"
+    },
+    "python": {
+      "title": "Python",
+      "type": "string"
+    },
+    "repeat_index": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Repeat Index"
+    },
+    "requested_models": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Requested Models",
+      "type": "array"
+    },
+    "run_id": {
+      "title": "Run Id",
+      "type": "string"
+    },
+    "sampling_seed": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Sampling Seed"
+    },
+    "schedule": {
+      "$ref": "#/$defs/Schedule"
+    },
+    "seed_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Seed Id"
+    },
+    "seed_sha256": {
+      "title": "Seed Sha256",
+      "type": "string"
+    },
+    "seed_text": {
+      "title": "Seed Text",
+      "type": "string"
+    },
+    "served_models": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Served Models",
+      "type": "array"
+    },
+    "slug": {
+      "title": "Slug",
+      "type": "string"
+    },
+    "started_at": {
+      "title": "Started At",
+      "type": "string"
+    },
+    "status": {
+      "$ref": "#/$defs/RunStatus"
+    },
+    "stop_rule": {
+      "$ref": "#/$defs/StopRule"
+    },
+    "temperatures": {
+      "$ref": "#/$defs/Temperatures"
+    },
+    "termination_reason": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TerminationReason"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "top_p": {
+      "title": "Top P",
+      "type": "number"
+    },
+    "version": {
+      "title": "Version",
+      "type": "string"
+    }
+  },
   "required": [
     "status",
     "run_id",
     "slug",
     "version",
-    "git_sha",
-    "git_dirty",
     "python",
     "os",
-    "lock_sha256",
-    "prompt_sha256",
-    "rubric_version",
     "seed_sha256",
+    "seed_text",
     "seed_id",
-    "corpus_version",
-    "corpus_sha256",
+    "claims",
     "condition",
     "schedule",
     "requested_models",
@@ -29,6 +459,7 @@
     "max_cycles",
     "max_tokens",
     "stop_rule",
+    "max_judge_error_share",
     "judge_panel",
     "started_at",
     "ended_at",
@@ -42,192 +473,8 @@
     "error",
     "batch_id",
     "repeat_index",
-    "baseline",
-    "preregistration_sha256"
+    "baseline"
   ],
-  "properties": {
-    "status": {"enum": ["running", "finished", "failed"]},
-    "run_id": {"type": "string", "format": "uuid"},
-    "slug": {"type": "string"},
-    "version": {"type": "string"},
-    "git_sha": {"type": ["string", "null"]},
-    "git_dirty": {"type": ["boolean", "null"]},
-    "python": {"type": "string"},
-    "os": {"type": "string"},
-    "lock_sha256": {
-      "anyOf": [
-        {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-        {"type": "null"}
-      ]
-    },
-    "prompt_sha256": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "a2q",
-        "q2a",
-        "judge_system",
-        "judge_user",
-        "answerability",
-        "identity",
-        "paraphrase"
-      ],
-      "properties": {
-        "a2q": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-        "q2a": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-        "judge_system": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-        "judge_user": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-        "answerability": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-        "identity": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-        "paraphrase": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
-      }
-    },
-    "rubric_version": {"type": "string"},
-    "seed_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-    "seed_id": {"type": ["string", "null"]},
-    "corpus_version": {"type": ["string", "null"]},
-    "corpus_sha256": {
-      "anyOf": [
-        {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-        {"type": "null"}
-      ]
-    },
-    "condition": {"type": "string"},
-    "schedule": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["name", "models"],
-      "properties": {
-        "name": {"type": "string"},
-        "models": {"type": "array", "items": {"type": "string"}}
-      }
-    },
-    "requested_models": {"type": "array", "items": {"type": "string"}},
-    "served_models": {"type": "array", "items": {"type": "string"}},
-    "providers": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["model", "provider"],
-        "properties": {
-          "model": {"type": "string"},
-          "provider": {"type": "string"}
-        }
-      }
-    },
-    "temperatures": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["transform", "judge"],
-      "properties": {
-        "transform": {"type": "number"},
-        "judge": {"type": "number"}
-      }
-    },
-    "top_p": {"type": "number", "minimum": 0, "maximum": 1},
-    "sampling_seed": {
-      "anyOf": [
-        {"type": "integer", "minimum": 1},
-        {"type": "null"}
-      ]
-    },
-    "max_cycles": {"type": "integer"},
-    "max_tokens": {"type": "integer"},
-    "stop_rule": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["name", "threshold", "consecutive"],
-      "properties": {
-        "name": {"type": "string"},
-        "threshold": {"type": "number"},
-        "consecutive": {"type": "integer", "minimum": 0}
-      }
-    },
-    "judge_panel": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["model", "samples"],
-        "properties": {
-          "model": {"type": "string"},
-          "samples": {"type": "integer"}
-        }
-      }
-    },
-    "started_at": {"type": "string", "format": "date-time"},
-    "ended_at": {
-      "anyOf": [
-        {"type": "string", "format": "date-time"},
-        {"type": "null"}
-      ]
-    },
-    "prompt_tokens": {"type": "integer", "minimum": 0},
-    "completion_tokens": {"type": "integer", "minimum": 0},
-    "cost": {"type": "number", "minimum": 0},
-    "errors": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["generation", "judge"],
-      "properties": {
-        "generation": {"type": "integer", "minimum": 0},
-        "judge": {"type": "integer", "minimum": 0}
-      }
-    },
-    "termination_reason": {
-      "enum": [
-        "threshold",
-        "max_cycles",
-        "generation_error",
-        "judge_error",
-        "budget_exceeded",
-        "interrupted",
-        "insufficient_credits",
-        null
-      ]
-    },
-    "budget": {
-      "anyOf": [
-        {"type": "number", "minimum": 0},
-        {"type": "null"}
-      ]
-    },
-    "deadline_seconds": {"type": "number", "minimum": 0},
-    "error": {"type": ["string", "null"]},
-    "batch_id": {
-      "anyOf": [
-        {"type": "string", "format": "uuid"},
-        {"type": "null"}
-      ]
-    },
-    "repeat_index": {
-      "anyOf": [
-        {"type": "integer", "minimum": 0},
-        {"type": "null"}
-      ]
-    },
-    "baseline": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "embedding_model",
-        "embedding_revision",
-        "nli_model",
-        "nli_revision"
-      ],
-      "properties": {
-        "embedding_model": {"type": ["string", "null"]},
-        "embedding_revision": {"type": ["string", "null"]},
-        "nli_model": {"type": ["string", "null"]},
-        "nli_revision": {"type": ["string", "null"]}
-      }
-    },
-    "preregistration_sha256": {
-      "anyOf": [
-        {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-        {"type": "null"}
-      ]
-    }
-  }
+  "title": "Manifest",
+  "type": "object"
 }
