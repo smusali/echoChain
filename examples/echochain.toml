@@ -1,0 +1,2 @@
+seed = "redis-epoll"
+max_cycles = 2

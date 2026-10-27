@@ -11,24 +11,21 @@ permissions:
 jobs:
   smoke:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           python-version: "3.11"
           enable-cache: true
 
       - name: Install
-        run: uv sync --frozen --extra dev
+        run: uv sync --frozen --group dev --no-editable
 
       - name: Live cycle
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-        run: |
-          if [ -z "$OPENROUTER_API_KEY" ]; then
-            echo "OPENROUTER_API_KEY is unset; skipping"
-            exit 0
-          fi
-          uv run echochain models
-          uv run echochain --start "Redis uses single-threaded event loops with epoll for I/O multiplexing" --max-cycles 1 --repeats 1 --budget 0.10 --yes
+        run: sh tools/smoke.sh

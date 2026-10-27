@@ -1,42 +1,39 @@
 # Methodology
 
-echoChain measures how a technical statement changes as models rewrite it. This note is the measurement definition for rubric version 2. A finished run can be rebuilt from its manifest: package version, prompt template hashes, corpus hash, condition, models, temperatures, `top_p`, `sampling_seed`, baseline model revisions, and the pre-registration hash.
+echoChain starts from a seed answer and asks models to rewrite it. Question steps turn an answer into a question. Answer steps turn that question back into an answer. A judge scores every step, and the run stops on a rule recorded in the manifest.
 
-## What is measured
+```mermaid
+flowchart LR
+  Answer["Answer text"] --> Kind{"Step kind"}
+  Kind -->|"question"| Ask["Answerability"]
+  Kind -->|"answer"| Faith["Fidelity"]
+  Faith --> Claims["Claim verdicts"]
+  Ask --> Score["Numeric score"]
+  Claims --> Score
+```
 
-The primary metric is claim fidelity. Each corpus seed has a frozen list of claims. The judge marks every claim `supported`, `contradicted`, or `not_mentioned`. Claim fidelity is the share marked `supported`. The contradiction rate is the share marked `contradicted`. Neither ratio is compared with the stop threshold.
+## Metrics
 
-Every judge call also returns two holistic scores. `anchored` is a 1 to 5 score whose levels separate a preserved mechanism from a preserved topic. `score` is the existing 1 to 10 comparison. The 1 to 10 mean is the only number the stop rule reads. Question steps are scored for answerability and stay off the fidelity curves.
+The judge scores answerability on a question step and fidelity on an answer step. Both use the prompt's 1 to 10 scale. An anchored score uses 1 to 5. When the seed lists claims, a fidelity step also records a supported or unsupported verdict for each claim. The row stores the score, the claim verdicts, and a comparison with the previous answer.
 
-A later answer is also judged against the previous answer, not against the question in between. The first answer leaves those fields empty. Seed-targeted samples and previous-answer samples are stored in separate lists.
-
-## Baseline
-
-Each step stores a `baseline` object that does not use the judge. On an answer step, cosine similarity and entailment use pinned models: embedding `sentence-transformers/all-MiniLM-L6-v2` at revision `1110a243fdf4706b3f48f1d95db1a4f5529b4d41`, and NLI `cross-encoder/nli-MiniLM2-L6-H768` at revision `b95119ce93d3e065de6214e38cd4a97b0f2f2c6d`. Forward entailment treats the reference as the premise and the answer as the hypothesis. The stored value is the entailment-class probability from the model's own label map. A lexical run leaves those neural fields null. `length_ratio` is the answer's Unicode code points divided by the seed's. An empty seed has no ratio. `technical_survival` is the share of the seed's technical tokens that occur again as whole tokens. Technical tokens are casefolded complexity expressions with internal spaces removed, digit literals, acronyms of two or more capitals, hyphenated compounds, and remaining alphabetic tokens of length at least 3 that are not in a fixed closed-class list. `generic_share` is the share of the answer's word tokens that are in that list. A question step stores the same object with every value null. The first answer leaves the previous-answer fields null.
-
-`echochain analyze` plots claim fidelity, cosine to the seed, backward entailment, technical survival, generic share, and length ratio. Previous-answer series stay in `curves.tsv`. For `generic_share` and `length_ratio`, a condition with at least three runs that have both endpoints gets an ordinary least-squares fit of the last value on the first. When the absolute slope is below 1, the report prints the slope, the strength `1 - slope`, and the position given by the intercept divided by that strength. Otherwise it prints that the fit was not estimated. Those curves are sanity checks, not extra primary endpoints.
+Length, token survival, and generic-word share are computed without a judge. With `baseline` set to `off`, a lexical scorer fills the comparison fields it can. With `baseline` set to `neural`, a pinned sentence-transformer model adds cosine similarity and an entailment score. A resumed run keeps the neural models recorded on its manifest.
 
 ## Conditions
 
-`alternate` and `swap` are telephone chains with rotating models. `same-model` keeps the telephone prompts and uses one model. `identity` asks the model to repeat the text. `paraphrase` asks for a paraphrase and does not turn the text into a question. Repeats multiply whole runs. The command default is one repeat. `examples/study.toml` sets three.
+The rotating conditions are `alternate`, `swap`, `factorial`, and `latin`. Each one assigns the configured models to steps through a fixed schedule. `fixed:<model>` sends every step to one model. The controls are `same-model`, `identity`, and `paraphrase`. Identity uses temperature 0 and scores fidelity on every step. Paraphrase asks for a same-length rewrite. `all` runs the controls together with `alternate`.
 
-## Judge panel
+Two models that share a vendor family cannot sit in the same rotating set. The judge panel is a separate model list. A step can call the judge more than once. The mean is missing when a reply does not parse, and the run stops if those failures exceed `max_judge_error_share` of the planned steps.
 
-The default judge is `openai/gpt-4.1-mini`, with 3 samples at temperature 0.5. A model family is the slug before the first slash. A run is rejected when a judge family is also a generator family. Model ids are not written into the prompts.
+## Analysis
 
-## Sampling
-
-`seed` in the configuration selects a corpus item. The sampling integer is `sampling_seed`. When `--sampling-seed` is omitted, each run draws one positive integer and stores it on the manifest. A call sends `base + step * 1000 + sample_index * 10 + target`. Target 0 is the transform, 1 is the seed comparison, and 2 is the previous-answer comparison. The row records that integer. `top_p` defaults to 1.0, is sent on every call, and is stored on the manifest and on the step parameters. `seed_honored` is true or false only when the provider echoes a seed. Otherwise it is null.
-
-## Summaries
-
-`echochain analyze` pools runs only when they share one rubric version. A missing new field is treated as null. Curve intervals resample seed ids with `random.Random(0)`, keep every run of a drawn seed, and use a linear percentile. A run with no seed id is its own cluster. The survival event is the answer step that completes the manifest streak of 1 to 10 means at or below the threshold. A streak length of 0 is read as 1. Question steps and missing scores leave the streak unchanged, and a mean above the threshold resets it. If the streak never completes, the time is the last completed step and the event flag is 0. That includes stops for budget, generation, judge failure, credit exhaustion, and interrupt. A censored observation at time `t` stays in the risk set at `t` and then leaves. The Kaplan-Meier curve is the product limit. The restricted mean is the area under that curve from 0 to `tau`, where `tau` is `max_cycles` for the condition. A time after `tau` is censored at `tau`. Censored runs stay in the sample. The area follows Royston and Parmar, BMC Medical Research Methodology, 2013, DOI 10.1186/1471-2288-13-152. Its interval uses its own `random.Random(0)` draw sequence, the same cluster rule, 1000 draws, and the same linear percentile. The report prints `tau`, the median or `not reached`, and the share of runs that degraded by `tau`. Each run is listed as `event at step N`, `censored at N` when follow-up reached the horizon, or `censored at step N` when it stopped earlier. Pairwise log-rank tests use the Mantel-Haenszel variance and a two-sided p-value on one degree of freedom.
+`echochain analyze` reads finished run directories. It writes bootstrap curves of the score by step, a Kaplan-Meier curve of steps until the score stays at or below the threshold, the restricted mean of that time, and a log-rank comparison when more than one run is given. The attractor fit regresses the last score on the first when a group has enough runs and the absolute slope is below 1.
 
 ## Limitations
 
-- Judge family bias. The vendor check keeps the judge's family off the generator list, and the human-label protocol in `docs/judge-validation.md` is the remaining check. Those labels are not collected.
-- Provider nondeterminism. The client sends a seed, records whether the provider echoed it, repeats runs, and reports clustered intervals.
-- Model retirement. Catalog preflight rejects an unknown id, and the nightly smoke job calls the configured models.
-- Small English-only corpus. The held-out split is the unused portion of this corpus. The runs do not support a claim about a broader population.
-- Answerability. Question steps stay off the fidelity curves.
-- Injected instructions. Chain text is wrapped in tags, and a colliding tag is shielded before it is sent.
+The score is a model judgment, not a fact check. A short chain can stop on the cycle cap before the threshold. Catalog prices can be missing, so a dry-run cost can be unknown. The lexical comparison does not measure meaning. The neural comparison depends on the pinned embedding and entailment models and is off unless requested.
+
+## Built on
+
+- Claim-level scoring, after FActScore (Min et al., EMNLP 2023).
+- The telephone chain, after Mohamed et al. (ACL 2025) and Perez et al. (ICLR 2025), whose attractor fit `analyze` reports.
+- Restricted mean survival time, after Royston and Parmar (BMC Medical Research Methodology, 2013).
