@@ -168,6 +168,21 @@ Unknown keys, wrong types, and an empty model list exit with code 2. The message
 
 `echochain --help` lists the same codes.
 
+## Stability
+
+[Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html) item 4 says a `0.y.z` release may change anything. While echoChain is `0.x`, this project makes a narrower promise. The promise starts with `0.2.0`.
+
+The public contract is:
+
+- the JSON Schemas in `schemas/` (`manifest.schema.json` and `row.schema.json`)
+- the commands and flags
+- the exit codes
+- the termination reasons
+
+While echoChain is 0.x, an incompatible change to the contract bumps the minor version and is listed under Changed or Removed in CHANGELOG.md, and any other change bumps the patch version.
+
+An incompatible change breaks a script or a saved run: a renamed or removed command or flag, a different exit code, a renamed, removed, retyped, or newly required schema field, or a renamed or removed termination reason. A compatible addition or a fix bumps the patch version.
+
 ## Cost and budgets
 
 `--dry-run` prints the run count, the maximum call count, `tokens_upper_bound`, and `cost_upper_bound_usd`. It does not make a completion call. On a batch resume it counts and prices only the cells that are not finished, and a resumed cell is priced as a full cell. The token ceiling is the rendered prompt, or `max_tokens` for a later step's input, plus `max_tokens` for the completion, plus 16 tokens of chat framing. The cost ceiling uses the full prompt and completion prices from OpenRouter's model list, plus `pricing.request` when that field is present. Cache-read prices are not used. The list is fetched once per command and is not stored.
