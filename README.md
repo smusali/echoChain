@@ -117,17 +117,24 @@ echochain config show
 # Check the configured models before a paid call
 echochain models
 
-# Curves, survival, and pairwise log-rank tests from one or more run directories
+# Curves, survival, the restricted mean up to max_cycles, and pairwise log-rank tests
 echochain export --format csv runs/<run-directory>
 echochain analyze runs/<run-directory>
 
-# Continue an interrupted, failed, or unfinished run
+# Continue an interrupted, failed, credit-stopped, or unfinished run
 echochain run --resume RUN_ID
+
+# Continue the unfinished cells of a batch
+echochain run --resume BATCH_ID --out runs
 ```
 
-`echochain --start` is `echochain run --start`. `--quiet` hides the per-step lines. `--verbose` adds token counts and cost to those lines. Every run ends with the termination reason and the run directory.
+`echochain --start` is `echochain run --start`. `--quiet` hides the per-step lines. `--verbose` adds token counts and cost to those lines. Every run ends with one line: the termination reason, the last recorded step, the planned length, and the run directory. A run that reaches the cycle cap also says where the low-score streak first completed, or that the threshold was not reached. Exit code 0 prints that line on stdout. Every other code prints it on stderr.
 
-The `echochain` command is [`echochain.cli:main`](https://github.com/smusali/echoChain/blob/main/echochain/cli.py). `python -m echochain` calls the same function from [`echochain/__main__.py`](https://github.com/smusali/echoChain/blob/main/echochain/__main__.py). A live run calls OpenRouter and spends money. Each run is a new directory named with a UTC timestamp and a UUID ([`mk_exp_dir`](https://github.com/smusali/echoChain/blob/main/echochain/persistence.py)). `--out` chooses the parent directory and defaults to `runs`. `--budget` is a USD cap. When spend reaches it, the process records `budget_exceeded` and exits with code 3.
+```text
+max_cycles at step 30 of 30, threshold not reached: results saved to runs/<run>
+```
+
+The `echochain` command is [`echochain.cli:main`](https://github.com/smusali/echoChain/blob/main/echochain/cli.py). `python -m echochain` calls the same function from [`echochain/__main__.py`](https://github.com/smusali/echoChain/blob/main/echochain/__main__.py). A live run calls OpenRouter and spends money. Each run is a new directory named with a UTC timestamp and a UUID ([`mk_exp_dir`](https://github.com/smusali/echoChain/blob/main/echochain/persistence.py)). `--out` chooses the parent directory and defaults to `runs`. `--budget` is a USD cap. When spend reaches it, the process records `budget_exceeded` and exits with code 3. The same exit code is used when OpenRouter cannot reserve the call: the run records `insufficient_credits`.
 
 ## Configuration
 
@@ -156,14 +163,14 @@ Unknown keys, wrong types, and an empty model list exit with code 2. The message
 | 0 | Completed, because the threshold or the cycle cap was reached |
 | 1 | Runtime or API failure, including a generation or judge failure |
 | 2 | Usage or configuration error |
-| 3 | Budget exceeded |
+| 3 | Budget exceeded, or the account could not reserve the call |
 | 130 | Interrupted |
 
 `echochain --help` lists the same codes.
 
 ## Cost and budgets
 
-`--dry-run` prints the run count, the maximum call count, `tokens_upper_bound`, and `cost_upper_bound_usd`. It does not make a completion call. The token ceiling is the rendered prompt, or `max_tokens` for a later step's input, plus `max_tokens` for the completion, plus 16 tokens of chat framing. The cost ceiling uses the full prompt and completion prices from OpenRouter's model list, plus `pricing.request` when that field is present. Cache-read prices are not used. The list is fetched once per command and is not stored.
+`--dry-run` prints the run count, the maximum call count, `tokens_upper_bound`, and `cost_upper_bound_usd`. It does not make a completion call. On a batch resume it counts and prices only the cells that are not finished, and a resumed cell is priced as a full cell. The token ceiling is the rendered prompt, or `max_tokens` for a later step's input, plus `max_tokens` for the completion, plus 16 tokens of chat framing. The cost ceiling uses the full prompt and completion prices from OpenRouter's model list, plus `pricing.request` when that field is present. Cache-read prices are not used. The list is fetched once per command and is not stored.
 
 Without a key, or when a model has no price, the cost line is `unknown`. A known estimate above `confirm_above_usd` (default `$1`) does not start unless you pass `--yes`. `--dry-run` never asks for `--yes`. `--budget` still stops a run that is already in progress.
 
@@ -171,14 +178,16 @@ Without a key, or when a model has no price, the cost line is `unknown`. A known
 
 Each run creates a directory `runs/<UTC>_<run id>/`:
 
-- `manifest.json`, written as soon as the run starts and replaced atomically when it finishes. `providers` lists each requested model with the provider that served it. An interrupt keeps `status` as `finished`, sets `termination_reason` to `interrupted`, and exits with code 130. Any other catchable crash sets `status` to `failed` and stores a one-line `error`. A hard kill can still leave `status` as `running`, with each completed step already flushed to the JSONL.
+- `manifest.json`, written as soon as the run starts and replaced atomically when it finishes. `providers` lists each requested model with the provider that served it. `batch_id` and `repeat_index` name the cell inside a batch. An interrupt keeps `status` as `finished`, sets `termination_reason` to `interrupted`, and exits with code 130. A credit refusal that outlasts the waits also keeps `status` as `finished`, sets `termination_reason` to `insufficient_credits`, stores a one-line `error`, and exits with code 3. Any other catchable crash sets `status` to `failed` and stores a one-line `error`. A hard kill can still leave `status` as `running`, with each completed step already flushed to the JSONL.
 - `chain.jsonl`, one UTF-8 object per step. The object carries the run id, phase (`a2q`, `q2a`, `identity`, or `paraphrase`), condition, schedule, `score_kind`, requested and served model, provider, input and output text, prompt hash, finish reason, sampling parameters, latency, tokens, cost, generation id, judge samples, and a UTC timestamp. An answer step stores claim fidelity, the 1 to 10 mean, and the 1 to 5 mean against the seed. From the second answer onward it also stores those comparisons against the previous answer. A question step stores answerability on both scales. A failed judge sample stores a null score and an error code.
 
 [`Recorder`](https://github.com/smusali/echoChain/blob/main/echochain/persistence.py) writes those files. [`test_fake_cycle_records_served_model`](https://github.com/smusali/echoChain/blob/main/tests/test_cli.py) reads them. The manifest's token and cost totals are the sum of the JSONL rows, including judge calls. Schemas for both documents are in `schemas/`.
 
 `echochain export --format csv RUN` prints `cycle,phase,model,served_model,text,score` from that JSONL. A run does not write a CSV file.
 
-`echochain run --resume RUN` continues one interrupted, failed, or still-running run. `RUN` is the run directory or the run id under `--out`. The next step uses the last complete row's output, and the original seed is the first row's input. The condition, models, judge panel, stop rule, budget, and token cap come from the manifest. Provider pins and the API key come from the current configuration. Spend already recorded in the JSONL counts toward the budget. The low-score streak starts again. A run that finished for the threshold, the cycle cap, a generation failure, a judge failure, or the budget cannot be resumed. A chain with no complete step cannot be resumed, because the manifest stores the seed hash and not the seed text.
+`echochain run --resume RUN` continues one interrupted, failed, credit-stopped, or still-running run. `RUN` is the run directory, the run id under `--out`, or a batch id. The next step uses the last complete row's output, and the original seed is the first row's input. The condition, models, judge panel, stop rule, budget, and token cap come from the manifest. Provider pins and the API key come from the current configuration. Spend already recorded in the JSONL counts toward the budget. The low-score streak starts again. A run that finished for the threshold, the cycle cap, a generation failure, a judge failure, or the budget cannot be resumed. A single chain with no complete step cannot be resumed, because the manifest stores the seed hash and not the seed text.
+
+A batch writes `<batch id>.batch.json` under `--out` before the first cell. Resuming that batch id skips cells whose manifest already finished for a closed reason, continues the credit-stopped or unfinished cell in the same directory, and starts cells that never ran. A credit stop with no completed step restarts at step 1 in that same directory, using the seed text saved in the batch file. `--dry-run` with the batch id does not start a run.
 
 ### Sample output
 
@@ -203,7 +212,7 @@ echoChain/
 │   ├── engine.py        # Telephone game orchestration
 │   ├── client.py        # OpenRouter API communication
 │   ├── judge.py         # Judge scoring
-│   ├── analyze.py       # Curves, survival, and agreement
+│   ├── analyze.py       # Curves, survival, restricted means, and agreement
 │   ├── prompts/         # Versioned Jinja2 templates
 │   ├── config.py        # Defaults, the experiment file, and the API key
 │   └── persistence.py   # Manifest and JSONL output

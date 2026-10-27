@@ -124,6 +124,69 @@ def kaplan_meier(observations: Sequence[tuple[int, int]]) -> tuple[KaplanPoint, 
     return tuple(points)
 
 
+def degradation_step(
+    scores: Sequence[tuple[int, float | None]],
+    threshold: float,
+    consecutive: int,
+) -> int | None:
+    """Return the step where the low-fidelity streak completes.
+
+    Args:
+        scores: Ordered pairs of step and fidelity. None skips that step and
+            leaves the streak unchanged.
+        threshold: Fidelity at or below this value counts toward the streak.
+        consecutive: Scores required. Zero is read as one.
+
+    Returns:
+        The completing step, or None when the streak never completes.
+    """
+    needed = consecutive if consecutive > 0 else 1
+    streak = 0
+    for step, value in scores:
+        if value is None:
+            continue
+        if value <= threshold:
+            streak += 1
+        else:
+            streak = 0
+        if streak >= needed:
+            return step
+    return None
+
+
+def restricted_mean(observations: Sequence[tuple[int, int]], tau: int) -> float:
+    """Return the area under the survival curve from zero to tau.
+
+    Args:
+        observations: Pairs of time and event. Event 1 is a failure. Event 0
+            is censored. A time past tau is censored at tau.
+        tau: Upper limit of the integral.
+
+    Returns:
+        The restricted mean. It equals tau when every run is censored at tau.
+
+    Raises:
+        AnalyzeError: tau is negative.
+    """
+    if tau < 0:
+        raise AnalyzeError("tau is negative")
+    capped = tuple(
+        (time, event) if time <= tau else (tau, 0) for time, event in observations
+    )
+    area = 0.0
+    previous_time = 0
+    previous_survival = 1.0
+    for point in kaplan_meier(capped):
+        if point.time > tau:
+            break
+        area += previous_survival * (point.time - previous_time)
+        previous_time = point.time
+        previous_survival = point.survival
+    if previous_time < tau:
+        area += previous_survival * (tau - previous_time)
+    return area
+
+
 def median_time(points: Sequence[KaplanPoint]) -> int | None:
     """Return the first time survival is at or below one half.
 
@@ -320,7 +383,8 @@ def report(
         rng: Generator for the clustered bootstrap. None uses `random.Random(0)`.
 
     Returns:
-        The curves, survival, and comparison sections. Floats use six decimals.
+        The curves, survival, restricted mean, and comparison sections. Floats
+        use six decimals.
 
     Raises:
         AnalyzeError: A directory is unreadable or the rubric versions differ.
@@ -332,8 +396,9 @@ def report(
     if len(versions) != 1:
         raise AnalyzeError("rubric versions differ")
     generator = random.Random(0) if rng is None else rng
+    survival_rng = random.Random(0) if rng is None else generator
     curves = _curve_lines(runs, generator)
-    survival = _survival_lines(runs)
+    survival = _survival_lines(runs, survival_rng)
     comparisons = _comparison_lines(runs)
     text = "\n\n".join(
         (
@@ -362,6 +427,7 @@ class _Run:
     rubric: str
     time: int
     event: int
+    tau: int
     points: tuple[_Point, ...]
 
 
@@ -418,28 +484,47 @@ def _load(directory: Path) -> _Run:
     rubric = _text(manifest.get("rubric_version"), "rubric_version")
     seed_id = manifest.get("seed_id")
     cluster = seed_id if isinstance(seed_id, str) and seed_id != "" else run_id
-    threshold = _threshold(manifest.get("stop_rule"))
+    stop_rule = manifest.get("stop_rule")
+    threshold = _threshold(stop_rule)
+    consecutive = _consecutive(stop_rule)
     points = tuple(sorted((_point(row) for row in rows), key=lambda item: item.step))
-    observed_time, observed_event = _event_time(points, threshold)
+    observed_time, observed_event = _event_time(points, threshold, consecutive)
+    last = points[-1].step
+    horizon = _horizon(manifest.get("max_cycles"))
+    tau = last if horizon is None else horizon
+    time, event = _cap(observed_time, observed_event, tau)
     return _Run(
         run_id=run_id,
         condition=condition,
         cluster=cluster,
         rubric=rubric,
-        time=observed_time,
-        event=observed_event,
+        time=time,
+        event=event,
+        tau=tau,
         points=points,
     )
 
 
-def _event_time(points: Sequence[_Point], threshold: float) -> tuple[int, int]:
-    last = 0
-    for point in points:
-        last = point.step
-        value = point.values.get("fidelity_vs_seed")
-        if value is not None and value <= threshold:
-            return point.step, 1
-    return last, 0
+def _event_time(
+    points: Sequence[_Point],
+    threshold: float,
+    consecutive: int,
+) -> tuple[int, int]:
+    last = points[-1].step if points else 0
+    found = degradation_step(
+        tuple((point.step, point.values.get("fidelity_vs_seed")) for point in points),
+        threshold,
+        consecutive,
+    )
+    if found is None:
+        return last, 0
+    return found, 1
+
+
+def _cap(time: int, event: int, tau: int) -> tuple[int, int]:
+    if time > tau:
+        return tau, 0
+    return time, event
 
 
 def _point(row: Mapping[str, object]) -> _Point:
@@ -501,16 +586,23 @@ def _interval(
     return mean, percentile(draws, _LOW), percentile(draws, _HIGH), len(pooled)
 
 
-def _survival_lines(runs: Sequence[_Run]) -> list[str]:
-    lines = ["run_id\tcondition\ttime\tevent"]
+def _survival_lines(runs: Sequence[_Run], rng: random.Random) -> list[str]:
+    lines = ["run_id\tcondition\ttime\tevent\toutcome"]
     for run in sorted(runs, key=lambda item: (item.condition, item.run_id)):
-        lines.append(f"{run.run_id}\t{run.condition}\t{run.time}\t{run.event}")
+        lines.append(
+            f"{run.run_id}\t{run.condition}\t{run.time}\t{run.event}\t{_outcome(run)}"
+        )
     lines.append("kaplan_meier")
     lines.append("condition\ttime\tat_risk\tevents\tsurvival\tvariance")
     grouped = _by_condition(runs)
     medians = ["median", "condition\tmedian\tci_low\tci_high"]
+    restricted = [
+        "restricted_mean",
+        "condition\tmean\tci_low\tci_high\ttau\tmedian\tdegraded",
+    ]
     for condition in sorted(grouped):
-        observed = [(run.time, run.event) for run in grouped[condition]]
+        members = grouped[condition]
+        observed = [(run.time, run.event) for run in members]
         points = kaplan_meier(observed)
         for point in points:
             lines.append(
@@ -518,10 +610,58 @@ def _survival_lines(runs: Sequence[_Run]) -> list[str]:
                 f"{_fmt(point.survival)}\t{_fmt(point.variance)}"
             )
         low, high = median_bounds(points)
-        medians.append(
-            f"{condition}\t{_cell(median_time(points))}\t{_cell(low)}\t{_cell(high)}"
+        reached = median_time(points)
+        medians.append(f"{condition}\t{_cell(reached)}\t{_cell(low)}\t{_cell(high)}")
+        tau = _one_tau(members)
+        mean, ci_low, ci_high = _restricted_interval(members, tau, rng)
+        share = sum(run.event for run in members) / len(members)
+        median = "not reached" if reached is None else str(reached)
+        restricted.append(
+            f"{condition}\t{_fmt(mean)}\t{_fmt(ci_low)}\t{_fmt(ci_high)}\t"
+            f"{tau}\t{median}\t{_fmt(share)}"
         )
-    return lines + medians
+    return lines + medians + restricted
+
+
+def _outcome(run: _Run) -> str:
+    if run.event == 1:
+        return f"event at step {run.time}"
+    if run.time >= run.tau:
+        return f"censored at {run.tau}"
+    return f"censored at step {run.time}"
+
+
+def _one_tau(runs: Sequence[_Run]) -> int:
+    horizons = {run.tau for run in runs}
+    if len(horizons) != 1:
+        raise AnalyzeError("max_cycles differs")
+    return next(iter(horizons))
+
+
+def _restricted_interval(
+    runs: Sequence[_Run],
+    tau: int,
+    rng: random.Random,
+) -> tuple[float, float, float]:
+    clusters: dict[str, list[tuple[int, int]]] = {}
+    for run in runs:
+        clusters.setdefault(run.cluster, []).append((run.time, run.event))
+    groups = [clusters[name] for name in sorted(clusters)]
+    pooled = [item for group in groups for item in group]
+    mean = restricted_mean(pooled, tau)
+    width = len(groups)
+    draws = [
+        restricted_mean(
+            [
+                item
+                for group in (groups[rng.randrange(width)] for _draw in range(width))
+                for item in group
+            ],
+            tau,
+        )
+        for _sample in range(_DRAWS)
+    ]
+    return mean, percentile(draws, _LOW), percentile(draws, _HIGH)
 
 
 def _comparison_lines(runs: Sequence[_Run]) -> list[str]:
@@ -797,6 +937,23 @@ def _threshold(value: object) -> float:
     if number is None:
         raise AnalyzeError("stop_rule threshold is missing")
     return number
+
+
+def _consecutive(value: object) -> int:
+    if not isinstance(value, dict) or "consecutive" not in value:
+        return 1
+    raw = value.get("consecutive")
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+        raise AnalyzeError("stop_rule consecutive is invalid")
+    return raw
+
+
+def _horizon(value: object) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise AnalyzeError("max_cycles is invalid")
+    return value
 
 
 def _optional_number(value: object) -> float | None:

@@ -46,6 +46,7 @@ _COMPLETE = frozenset(
         "budget_exceeded",
     }
 )
+_RESUMABLE = frozenset({"interrupted", "insufficient_credits"})
 _PROMPT_KEYS = (
     "a2q",
     "q2a",
@@ -63,6 +64,7 @@ TerminationReason = Literal[
     "judge_error",
     "budget_exceeded",
     "interrupted",
+    "insufficient_credits",
 ]
 
 
@@ -231,6 +233,8 @@ class Manifest(TypedDict):
     budget: float | None
     deadline_seconds: float
     error: str | None
+    batch_id: str | None
+    repeat_index: int | None
 
 
 @dataclass(frozen=True)
@@ -254,6 +258,8 @@ class ManifestDesign:
     requested_models: tuple[str, ...] | None = None
     sampling_seed: int | None = None
     top_p: float | None = None
+    batch_id: str | None = None
+    repeat_index: int | None = None
 
 
 @dataclass(frozen=True)
@@ -401,6 +407,8 @@ def running_manifest(
         "budget": budget,
         "deadline_seconds": deadline,
         "error": None,
+        "batch_id": chosen.batch_id,
+        "repeat_index": chosen.repeat_index,
     }
 
 
@@ -443,11 +451,48 @@ class ResumePlan:
     rows: tuple[Mapping[str, object], ...]
 
 
-def prepare_resume(directory: Path) -> ResumePlan:
+def read_manifest(directory: Path) -> Manifest:
+    """Load the manifest stored in a run directory.
+
+    Args:
+        directory: Run directory containing `manifest.json`.
+
+    Returns:
+        The stored manifest.
+
+    Raises:
+        RunDataError: The manifest is missing or invalid.
+    """
+    path = directory / "manifest.json"
+    if not path.is_file():
+        raise RunDataError("manifest.json was not found")
+    return _load_manifest(path)
+
+
+def finished_reason(reason: TerminationReason | None) -> bool:
+    """Return whether this reason closes a run.
+
+    Args:
+        reason: Termination reason. None means the run has not finished.
+
+    Returns:
+        True when the run cannot continue.
+    """
+    return reason in _COMPLETE
+
+
+def _closed(status: str, reason: TerminationReason | None) -> bool:
+    if finished_reason(reason):
+        return True
+    return status == "finished" and reason not in _RESUMABLE
+
+
+def prepare_resume(directory: Path, seed: str | None = None) -> ResumePlan:
     """Load a run that can continue from its last complete step.
 
     Args:
         directory: Run directory containing the manifest and the JSONL chain.
+        seed: Seed text for a chain with no complete step. None rejects that chain.
 
     Returns:
         The manifest, the seed, the text to continue from, and the next step.
@@ -458,30 +503,38 @@ def prepare_resume(directory: Path) -> ResumePlan:
     chain = directory / "chain.jsonl"
     _clip_partial(chain)
     manifest = _load_manifest(manifest_path)
-    reason = manifest["termination_reason"]
-    if reason in _COMPLETE or (
-        manifest["status"] == "finished" and reason != "interrupted"
-    ):
+    if _closed(manifest["status"], manifest["termination_reason"]):
         raise RunDataError("run is already finished")
     rows = tuple(_read_chain(chain))
-    if not rows:
+    kept: tuple[Mapping[str, object], ...]
+    if rows:
+        _require_steps(rows)
+        opening = _text(rows[0], "input_text", "recorded input is missing")
+        current = _text(rows[-1], "output_text", "recorded output is missing")
+        next_step = len(rows) + 1
+        spent = _spent(rows)
+        kept = rows
+    elif seed is None:
         raise RunDataError("run has no completed step")
-    _require_steps(rows)
-    seed = _text(rows[0], "input_text", "recorded input is missing")
-    if sha256_text(seed) != manifest["seed_sha256"]:
+    else:
+        opening = seed
+        current = seed
+        next_step = 1
+        spent = 0.0
+        kept = ()
+    if sha256_text(opening) != manifest["seed_sha256"]:
         raise RunDataError("recorded input does not match the seed hash")
-    current = _text(rows[-1], "output_text", "recorded output is missing")
     manifest["status"] = "running"
     manifest["ended_at"] = None
     manifest["error"] = None
     manifest["termination_reason"] = None
     return ResumePlan(
         manifest=manifest,
-        seed=seed,
+        seed=opening,
         current=current,
-        next_step=len(rows) + 1,
-        spent=_spent(rows),
-        rows=rows,
+        next_step=next_step,
+        spent=spent,
+        rows=kept,
     )
 
 
@@ -582,16 +635,17 @@ class Recorder:
                     ),
                 )
 
-    def finish(self, reason: TerminationReason) -> None:
+    def finish(self, reason: TerminationReason, error: str | None = None) -> None:
         """Write the final manifest.
 
         Args:
             reason: Why the run stopped.
+            error: One-line failure summary. None clears any earlier summary.
         """
         self._manifest["status"] = "finished"
         self._manifest["ended_at"] = utc_now()
         self._manifest["termination_reason"] = reason
-        self._manifest["error"] = None
+        self._manifest["error"] = error
         self._commit()
 
     def fail(self, exc: BaseException) -> None:
@@ -925,6 +979,8 @@ def _manifest(raw: Mapping[str, object]) -> Manifest:
         "budget": _optional_amount(raw.get("budget")),
         "deadline_seconds": _amount(raw.get("deadline_seconds")),
         "error": _optional_string(raw.get("error"), "error"),
+        "batch_id": _optional_string(raw.get("batch_id"), "batch_id"),
+        "repeat_index": _optional_index(raw.get("repeat_index")),
     }
 
 
@@ -979,6 +1035,7 @@ _REASONS: dict[str, TerminationReason] = {
     "judge_error": "judge_error",
     "budget_exceeded": "budget_exceeded",
     "interrupted": "interrupted",
+    "insufficient_credits": "insufficient_credits",
 }
 
 
@@ -1027,6 +1084,14 @@ def _optional_bool(value: object, label: str) -> bool | None:
         return None
     if not isinstance(value, bool):
         raise RunDataError(f"{label} must be a boolean")
+    return value
+
+
+def _optional_index(value: object) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise RunDataError("repeat_index must be a non-negative integer")
     return value
 
 

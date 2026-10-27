@@ -4,16 +4,18 @@ import argparse
 import csv
 import json
 import logging
+import os
 import secrets
 import statistics
 import sys
+import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
 from echochain import __version__
 from echochain import client as client_mod
-from echochain.analyze import AnalyzeError, report
+from echochain.analyze import AnalyzeError, degradation_step, report
 from echochain.client import ModelRecord
 from echochain.config import (
     ConfigError,
@@ -53,8 +55,10 @@ from echochain.persistence import (
     ResumePlan,
     RunDataError,
     TerminationReason,
+    finished_reason,
     mk_exp_dir,
     prepare_resume,
+    read_manifest,
     running_manifest,
 )
 from echochain.prompts import (
@@ -67,6 +71,7 @@ from echochain.prompts import (
 _EXIT_BUDGET = 3
 _EXIT_CONFIG = 2
 _EXIT_INTERRUPTED = 130
+_BATCH_SUFFIX = ".batch.json"
 _FRAMING_TOKENS = 16
 _COMMANDS = frozenset({"run", "config", "export", "analyze", "models"})
 _FORMAT = argparse.RawDescriptionHelpFormatter
@@ -75,12 +80,13 @@ examples:
   echochain --start TEXT --out runs --budget 1
   echochain run --seeds seeds/v1.toml --split study
   echochain run --resume RUN_ID
+  echochain run --resume BATCH_ID --out runs
 
 exit codes:
   0    completed, the threshold or the cycle cap was reached
   1    runtime or API failure
   2    usage or configuration error
-  3    budget exceeded
+  3    budget exceeded or insufficient credits
   130  interrupted
 """
 _CSV_FIELDS = ("cycle", "phase", "model", "served_model", "text", "score")
@@ -105,28 +111,12 @@ class Batch:
     seeds: tuple[PlannedSeed, ...]
     conditions: tuple[Condition, ...]
 
-    @property
-    def run_count(self) -> int:
-        """Return how many runs this batch starts.
 
-        Returns:
-            Seeds times conditions times repeats.
-        """
-        return len(self.seeds) * len(self.conditions) * self.settings.repeats
-
-    @property
-    def calls(self) -> int:
-        """Return the maximum number of model calls.
-
-        Returns:
-            Transforms, seed comparisons, and previous-answer comparisons.
-        """
-        panel = len(self.settings.judge) * self.settings.judge_samples
-        per_condition = sum(
-            planned_calls(condition.prompts, self.settings.max_cycles, panel)
-            for condition in self.conditions
-        )
-        return per_condition * len(self.seeds) * self.settings.repeats
+@dataclass(frozen=True)
+class Cell:
+    seed: PlannedSeed
+    condition: Condition
+    repeat_index: int
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -137,8 +127,8 @@ def main(argv: list[str] | None = None) -> int:
 
     Returns:
         Process exit code. `0` is a completed run. `1` is a runtime or API
-        failure. `2` is a usage or configuration error. `3` means the budget
-        was exceeded. `130` means the run was interrupted.
+        failure. `2` is a usage or configuration error. `3` means spending
+        stopped. `130` means the run was interrupted.
     """
     _configure_logging()
     raw = list(sys.argv[1:] if argv is None else argv)
@@ -286,7 +276,7 @@ def _add_run_flags(run: argparse.ArgumentParser) -> None:
     )
     run.add_argument(
         "--resume",
-        help="Continue a run id or directory from its last complete step.",
+        help="Continue a run id, a run directory, or a batch id.",
     )
 
 
@@ -373,9 +363,10 @@ def _run(args: argparse.Namespace, settings: Settings) -> int:
     if args.resume:
         return _resume(args, settings, progress)
     batch = _batch(settings)
+    cells = _expand(batch)
     if args.dry_run:
-        return _dry_run(batch, settings)
-    return _execute(batch, settings, yes=args.yes, progress=progress)
+        return _dry_run(cells, settings)
+    return _execute(batch, cells, settings, yes=args.yes, progress=progress)
 
 
 def _batch(settings: Settings) -> Batch:
@@ -420,10 +411,27 @@ def _planned(corpus: Corpus, seed: Seed) -> PlannedSeed:
     )
 
 
-def _dry_run(batch: Batch, settings: Settings) -> int:
-    tokens, cost = _bounds(batch, settings, _optional_catalog(settings))
-    print(f"runs: {batch.run_count}")
-    print(f"calls: {batch.calls}")
+def _expand(batch: Batch) -> tuple[Cell, ...]:
+    return tuple(
+        Cell(seed, condition, repeat)
+        for seed in batch.seeds
+        for condition in batch.conditions
+        for repeat in range(batch.settings.repeats)
+    )
+
+
+def _calls(cells: Sequence[Cell], settings: Settings) -> int:
+    panel = len(settings.judge) * settings.judge_samples
+    return sum(
+        planned_calls(cell.condition.prompts, settings.max_cycles, panel)
+        for cell in cells
+    )
+
+
+def _dry_run(cells: Sequence[Cell], settings: Settings) -> int:
+    tokens, cost = _bounds(cells, settings, _optional_catalog(settings))
+    print(f"runs: {len(cells)}")
+    print(f"calls: {_calls(cells, settings)}")
     print(f"tokens_upper_bound: {tokens}")
     if cost is None:
         print("cost_upper_bound_usd: unknown")
@@ -434,6 +442,7 @@ def _dry_run(batch: Batch, settings: Settings) -> int:
 
 def _execute(
     batch: Batch,
+    cells: Sequence[Cell],
     settings: Settings,
     *,
     yes: bool,
@@ -441,41 +450,55 @@ def _execute(
 ) -> int:
     api_key = load_api_key()
     catalog = client_mod.fetch_catalog(api_key, settings=settings)
-    _tokens, cost = _bounds(batch, settings, catalog)
-    if cost is not None and cost > settings.confirm_above_usd and not yes:
-        message = (
-            f"estimated cost {cost:.6f} USD exceeds "
-            f"{settings.confirm_above_usd:.6f} USD; pass --yes to start"
-        )
-        return _fail(message, _EXIT_CONFIG)
+    if _confirm(cells, settings, catalog, yes=yes):
+        return _EXIT_CONFIG
     client_mod.check_models(
         catalog,
         (*settings.models, *settings.judge),
         required=settings.required_parameters,
     )
-    for seed in batch.seeds:
-        for condition in batch.conditions:
-            for _ in range(settings.repeats):
-                directory, reason = _one(seed, condition, settings, api_key, progress)
-                code = _report(directory, reason)
-                if code != 0:
-                    return code
+    batch_id = str(uuid.uuid4())
+    _write_batch(settings.out / f"{batch_id}{_BATCH_SUFFIX}", batch_id, batch)
+    for cell in cells:
+        directory, reason = _one(cell, settings, api_key, progress, batch_id)
+        code = _report(directory, reason)
+        if code != 0:
+            return code
     return 0
 
 
+def _confirm(
+    cells: Sequence[Cell],
+    settings: Settings,
+    catalog: Mapping[str, client_mod.ModelRecord],
+    *,
+    yes: bool,
+) -> bool:
+    _tokens, cost = _bounds(cells, settings, catalog)
+    if cost is None or cost <= settings.confirm_above_usd or yes:
+        return False
+    message = (
+        f"estimated cost {cost:.6f} USD exceeds "
+        f"{settings.confirm_above_usd:.6f} USD; pass --yes to start"
+    )
+    _fail(message, _EXIT_CONFIG)
+    return True
+
+
 def _one(
-    seed: PlannedSeed,
-    condition: Condition,
+    cell: Cell,
     settings: Settings,
     api_key: str,
     progress: Callable[[StepNote], None] | None,
+    batch_id: str,
 ) -> tuple[Path, TerminationReason]:
+    seed = cell.seed
     base = settings.sampling_seed
     if base is None:
         base = secrets.randbelow(2**31 - 1) + 1
     spec = replace(
         default_spec(
-            condition,
+            cell.condition,
             SeedRef(seed.seed_id, seed.corpus_version, seed.corpus_sha256),
             max_cycles=settings.max_cycles,
             stop_consecutive=settings.stop_consecutive,
@@ -501,26 +524,56 @@ def _one(
         slug=allocated.slug,
         seed=seed.text,
         budget=spec.budget,
-        design=_design(spec, settings),
+        design=_design(spec, settings, batch_id, cell.repeat_index),
     )
-    with Recorder(allocated.directory, manifest) as recorder:
-        with client_mod.OpenRouterClient(api_key, settings=settings) as client:
-            try:
-                reason = cycle(
-                    seed.text,
-                    recorder,
-                    client,
-                    run_id=allocated.run_id,
-                    spec=spec,
-                )
-            except KeyboardInterrupt:
-                recorder.finish("interrupted")
-                return allocated.directory, "interrupted"
-        recorder.finish(reason)
+    reason = _drive(
+        _Attempt(allocated.directory, manifest, seed.text, spec),
+        api_key,
+        settings,
+    )
     return allocated.directory, reason
 
 
-def _design(spec: RunSpec, settings: Settings) -> ManifestDesign:
+@dataclass(frozen=True)
+class _Attempt:
+    directory: Path
+    manifest: Manifest
+    seed: str
+    spec: RunSpec
+    prior: Sequence[Mapping[str, object]] | None = None
+
+
+def _drive(attempt: _Attempt, api_key: str, settings: Settings) -> TerminationReason:
+    with Recorder(attempt.directory, attempt.manifest, prior=attempt.prior) as recorder:
+        with client_mod.OpenRouterClient(api_key, settings=settings) as client:
+            try:
+                reason = cycle(
+                    attempt.seed,
+                    recorder,
+                    client,
+                    run_id=attempt.manifest["run_id"],
+                    spec=attempt.spec,
+                )
+            except KeyboardInterrupt:
+                recorder.finish("interrupted")
+                return "interrupted"
+            except client_mod.InsufficientCreditsError as exc:
+                recorder.finish("insufficient_credits", _credit_error(exc))
+                return "insufficient_credits"
+        recorder.finish(reason)
+    return reason
+
+
+def _credit_error(exc: client_mod.InsufficientCreditsError) -> str:
+    return redact(f"{type(exc).__name__}: {exc}").splitlines()[0]
+
+
+def _design(
+    spec: RunSpec,
+    settings: Settings,
+    batch_id: str | None,
+    repeat_index: int | None,
+) -> ManifestDesign:
     return ManifestDesign(
         condition=spec.condition.name,
         schedule_name=spec.condition.schedule,
@@ -541,6 +594,8 @@ def _design(spec: RunSpec, settings: Settings) -> ManifestDesign:
         requested_models=(*settings.models, *settings.judge),
         sampling_seed=spec.sampling_seed,
         top_p=spec.top_p,
+        batch_id=batch_id,
+        repeat_index=repeat_index,
     )
 
 
@@ -549,47 +604,52 @@ def _resume(
     settings: Settings,
     progress: Callable[[StepNote], None] | None,
 ) -> int:
-    if (
-        args.dry_run
-        or args.start is not None
-        or args.seed is not None
-        or args.split is not None
-    ):
+    if args.start is not None or args.seed is not None or args.split is not None:
+        raise UsageError("--resume cannot be combined with a new run")
+    batch_file = _batch_path(str(args.resume), settings.out)
+    if batch_file is not None:
+        return _resume_batch(batch_file, args, settings, progress)
+    if args.dry_run:
         raise UsageError("--resume cannot be combined with a new run")
     directory = _find_run(str(args.resume), settings.out)
     plan = prepare_resume(directory)
-    panel = plan.manifest["judge_panel"]
+    tuned = _tune(settings, plan.manifest)
+    api_key = load_api_key()
+    _check(tuned, api_key)
+    reason = _drive(
+        _Attempt(
+            directory,
+            plan.manifest,
+            plan.seed,
+            _resume_spec(plan, tuned, progress),
+            plan.rows,
+        ),
+        api_key,
+        tuned,
+    )
+    return _report(directory, reason)
+
+
+def _tune(settings: Settings, manifest: Manifest) -> Settings:
+    panel = manifest["judge_panel"]
     if not panel:
         raise UsageError("run has no judge panel")
-    tuned = replace(
+    return replace(
         settings,
-        models=tuple(plan.manifest["schedule"]["models"]),
+        models=tuple(manifest["schedule"]["models"]),
         judge=tuple(member["model"] for member in panel),
-        max_tokens=plan.manifest["max_tokens"],
-        deadline_seconds=plan.manifest["deadline_seconds"],
+        max_tokens=manifest["max_tokens"],
+        deadline_seconds=manifest["deadline_seconds"],
     )
-    api_key = load_api_key()
-    catalog = client_mod.fetch_catalog(api_key, settings=tuned)
+
+
+def _check(settings: Settings, api_key: str) -> None:
+    catalog = client_mod.fetch_catalog(api_key, settings=settings)
     client_mod.check_models(
         catalog,
-        (*tuned.models, *tuned.judge),
-        required=tuned.required_parameters,
+        (*settings.models, *settings.judge),
+        required=settings.required_parameters,
     )
-    with Recorder(directory, plan.manifest, prior=plan.rows) as recorder:
-        with client_mod.OpenRouterClient(api_key, settings=tuned) as client:
-            try:
-                reason = cycle(
-                    plan.seed,
-                    recorder,
-                    client,
-                    run_id=plan.manifest["run_id"],
-                    spec=_resume_spec(plan, tuned, progress),
-                )
-            except KeyboardInterrupt:
-                recorder.finish("interrupted")
-                return _report(directory, "interrupted")
-        recorder.finish(reason)
-    return _report(directory, reason)
 
 
 def _resume_spec(
@@ -651,6 +711,374 @@ def _find_run(token: str, root: Path) -> Path:
         if len(matches) == 1:
             return matches[0]
     raise UsageError(f"run {token} was not found")
+
+
+def _batch_path(token: str, root: Path) -> Path | None:
+    candidate = Path(token)
+    if candidate.is_file() and candidate.name.endswith(_BATCH_SUFFIX):
+        return candidate
+    direct = root / f"{token}{_BATCH_SUFFIX}"
+    if direct.is_file():
+        return direct
+    return None
+
+
+@dataclass(frozen=True)
+class _Plan:
+    batch_id: str
+    seeds: tuple[PlannedSeed, ...]
+    conditions: tuple[str, ...]
+    repeats: int
+    models: tuple[str, ...]
+    judge: tuple[str, ...]
+    judge_samples: int
+    judge_temperature: float
+    temperature: float
+    max_cycles: int
+    max_tokens: int
+    stop_score: float
+    stop_consecutive: int
+    score_min: int
+    score_max: int
+    judge_error_numerator: int
+    judge_error_denominator: int
+    deadline_seconds: float
+    required_parameters: tuple[str, ...]
+    rubric_version: str
+    budget: float | None
+    confirm_above_usd: float
+    top_p: float
+    sampling_seed: int | None
+
+
+def _resume_batch(
+    path: Path,
+    args: argparse.Namespace,
+    settings: Settings,
+    progress: Callable[[StepNote], None] | None,
+) -> int:
+    plan = _read_batch(path)
+    tuned = _apply_batch(plan, settings)
+    batch = Batch(
+        settings=tuned,
+        seeds=plan.seeds,
+        conditions=resolve_conditions(
+            plan.conditions,
+            tuned.models,
+            temperature=tuned.temperature,
+        ),
+    )
+    indexed = _index_runs(tuned.out, plan.batch_id)
+    remaining: list[Cell] = []
+    continuations: dict[tuple[str | None, str, int], Path] = {}
+    for cell in _expand(batch):
+        key = (cell.seed.seed_id, cell.condition.name, cell.repeat_index)
+        skip, found = _pending(indexed.get(key, ()))
+        if skip:
+            continue
+        remaining.append(cell)
+        if found is not None:
+            continuations[key] = found
+    chosen = tuple(remaining)
+    if args.dry_run:
+        return _dry_run(chosen, tuned)
+    if not chosen:
+        return 0
+    api_key = load_api_key()
+    catalog = client_mod.fetch_catalog(api_key, settings=tuned)
+    if _confirm(chosen, tuned, catalog, yes=args.yes):
+        return _EXIT_CONFIG
+    client_mod.check_models(
+        catalog,
+        (*tuned.models, *tuned.judge),
+        required=tuned.required_parameters,
+    )
+    for cell in chosen:
+        key = (cell.seed.seed_id, cell.condition.name, cell.repeat_index)
+        found = continuations.get(key)
+        if found is None:
+            directory, reason = _one(cell, tuned, api_key, progress, plan.batch_id)
+        else:
+            directory, reason = _continue(
+                found, cell.seed.text, tuned, api_key, progress
+            )
+        code = _report(directory, reason)
+        if code != 0:
+            return code
+    return 0
+
+
+def _pending(paths: Sequence[Path]) -> tuple[bool, Path | None]:
+    resume_at: Path | None = None
+    for path in paths:
+        manifest = read_manifest(path)
+        if manifest["status"] == "finished" and finished_reason(
+            manifest["termination_reason"]
+        ):
+            return True, None
+        resume_at = path
+    return False, resume_at
+
+
+def _continue(
+    directory: Path,
+    seed: str,
+    settings: Settings,
+    api_key: str,
+    progress: Callable[[StepNote], None] | None,
+) -> tuple[Path, TerminationReason]:
+    plan = prepare_resume(directory, seed)
+    tuned = _tune(settings, plan.manifest)
+    reason = _drive(
+        _Attempt(
+            directory,
+            plan.manifest,
+            plan.seed,
+            _resume_spec(plan, tuned, progress),
+            plan.rows or None,
+        ),
+        api_key,
+        tuned,
+    )
+    return directory, reason
+
+
+def _index_runs(
+    root: Path, batch_id: str
+) -> dict[tuple[str | None, str, int], list[Path]]:
+    found: dict[tuple[str | None, str, int], list[Path]] = {}
+    if not root.is_dir():
+        return found
+    for path in root.iterdir():
+        if not path.is_dir() or not (path / "manifest.json").is_file():
+            continue
+        manifest = read_manifest(path)
+        repeat = manifest["repeat_index"]
+        if manifest["batch_id"] != batch_id or repeat is None:
+            continue
+        key = (manifest["seed_id"], manifest["condition"], repeat)
+        found.setdefault(key, []).append(path)
+    return found
+
+
+def _write_batch(path: Path, batch_id: str, batch: Batch) -> None:
+    settings = batch.settings
+    payload: dict[str, object] = {
+        "batch_id": batch_id,
+        "repeats": settings.repeats,
+        "conditions": [condition.name for condition in batch.conditions],
+        "seeds": [_seed_payload(seed) for seed in batch.seeds],
+        "models": list(settings.models),
+        "judge": list(settings.judge),
+        "judge_samples": settings.judge_samples,
+        "judge_temperature": settings.judge_temperature,
+        "temperature": settings.temperature,
+        "max_cycles": settings.max_cycles,
+        "max_tokens": settings.max_tokens,
+        "stop_score": settings.stop_score,
+        "stop_consecutive": settings.stop_consecutive,
+        "score_min": settings.score_min,
+        "score_max": settings.score_max,
+        "judge_error_numerator": settings.judge_error_numerator,
+        "judge_error_denominator": settings.judge_error_denominator,
+        "deadline_seconds": settings.deadline_seconds,
+        "required_parameters": list(settings.required_parameters),
+        "rubric_version": settings.rubric_version,
+        "budget": settings.budget,
+        "confirm_above_usd": settings.confirm_above_usd,
+        "top_p": settings.top_p,
+        "sampling_seed": settings.sampling_seed,
+    }
+    _write_object(path, payload)
+
+
+def _seed_payload(seed: PlannedSeed) -> dict[str, object]:
+    return {
+        "seed_id": seed.seed_id,
+        "text": seed.text,
+        "corpus_version": seed.corpus_version,
+        "corpus_sha256": seed.corpus_sha256,
+        "claims": [{"id": claim.id, "text": claim.text} for claim in seed.claims],
+    }
+
+
+def _write_object(path: Path, payload: Mapping[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(f"{path.suffix}.tmp")
+    data = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+    with temporary.open("w", encoding="utf-8") as handle:
+        handle.write(data)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)
+
+
+def _read_batch(path: Path) -> _Plan:
+    try:
+        parsed: object = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise UsageError("batch plan is not JSON") from exc
+    raw = _object(parsed, path.name)
+    batch_id = raw.get("batch_id")
+    if not isinstance(batch_id, str) or batch_id == "":
+        raise UsageError("batch plan is missing a batch id")
+    return _Plan(
+        batch_id=batch_id,
+        seeds=_plan_seeds(raw.get("seeds")),
+        conditions=_plan_strings(raw.get("conditions"), "conditions"),
+        repeats=_plan_int(raw.get("repeats"), "repeats"),
+        models=_plan_strings(raw.get("models"), "models"),
+        judge=_plan_strings(raw.get("judge"), "judge"),
+        judge_samples=_plan_int(raw.get("judge_samples"), "judge_samples"),
+        judge_temperature=_plan_float(
+            raw.get("judge_temperature"), "judge_temperature"
+        ),
+        temperature=_plan_float(raw.get("temperature"), "temperature"),
+        max_cycles=_plan_int(raw.get("max_cycles"), "max_cycles"),
+        max_tokens=_plan_int(raw.get("max_tokens"), "max_tokens"),
+        stop_score=_plan_float(raw.get("stop_score"), "stop_score"),
+        stop_consecutive=_plan_int(raw.get("stop_consecutive"), "stop_consecutive"),
+        score_min=_plan_int(raw.get("score_min"), "score_min"),
+        score_max=_plan_int(raw.get("score_max"), "score_max"),
+        judge_error_numerator=_plan_int(
+            raw.get("judge_error_numerator"), "judge_error_numerator"
+        ),
+        judge_error_denominator=_plan_int(
+            raw.get("judge_error_denominator"), "judge_error_denominator"
+        ),
+        deadline_seconds=_plan_float(raw.get("deadline_seconds"), "deadline_seconds"),
+        required_parameters=_plan_strings(
+            raw.get("required_parameters"), "required_parameters", allow_empty=True
+        ),
+        rubric_version=_plan_text(raw.get("rubric_version"), "rubric_version"),
+        budget=_plan_optional_float(raw.get("budget"), "budget"),
+        confirm_above_usd=_plan_float(
+            raw.get("confirm_above_usd"), "confirm_above_usd"
+        ),
+        top_p=_plan_float(raw.get("top_p"), "top_p"),
+        sampling_seed=_plan_optional_int(raw.get("sampling_seed"), "sampling_seed"),
+    )
+
+
+def _apply_batch(plan: _Plan, settings: Settings) -> Settings:
+    return replace(
+        settings,
+        models=plan.models,
+        judge=plan.judge,
+        judge_samples=plan.judge_samples,
+        judge_temperature=plan.judge_temperature,
+        temperature=plan.temperature,
+        max_cycles=plan.max_cycles,
+        max_tokens=plan.max_tokens,
+        stop_score=plan.stop_score,
+        stop_consecutive=plan.stop_consecutive,
+        score_min=plan.score_min,
+        score_max=plan.score_max,
+        judge_error_numerator=plan.judge_error_numerator,
+        judge_error_denominator=plan.judge_error_denominator,
+        deadline_seconds=plan.deadline_seconds,
+        required_parameters=plan.required_parameters,
+        rubric_version=plan.rubric_version,
+        repeats=plan.repeats,
+        budget=plan.budget,
+        confirm_above_usd=plan.confirm_above_usd,
+        top_p=plan.top_p,
+        sampling_seed=plan.sampling_seed,
+        condition=plan.conditions,
+        start=None,
+        seed=None,
+        split=None,
+    )
+
+
+def _plan_seeds(value: object) -> tuple[PlannedSeed, ...]:
+    if not isinstance(value, list) or not value:
+        raise UsageError("batch plan seeds are invalid")
+    seeds: list[PlannedSeed] = []
+    for item in value:
+        fields = _object(item, "seed")
+        seeds.append(
+            PlannedSeed(
+                seed_id=_plan_optional_text(fields.get("seed_id"), "seed_id"),
+                text=_plan_text(fields.get("text"), "text"),
+                corpus_version=_plan_optional_text(
+                    fields.get("corpus_version"), "corpus_version"
+                ),
+                corpus_sha256=_plan_optional_text(
+                    fields.get("corpus_sha256"), "corpus_sha256"
+                ),
+                claims=_plan_claims(fields.get("claims")),
+            )
+        )
+    return tuple(seeds)
+
+
+def _plan_claims(value: object) -> tuple[Claim, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise UsageError("batch plan claims are invalid")
+    claims: list[Claim] = []
+    for item in value:
+        fields = _object(item, "claim")
+        claim_id = fields.get("id")
+        text = fields.get("text")
+        if not isinstance(claim_id, str) or not isinstance(text, str):
+            raise UsageError("batch plan claims are invalid")
+        claims.append(Claim(claim_id, text))
+    return tuple(claims)
+
+
+def _plan_strings(
+    value: object, label: str, *, allow_empty: bool = False
+) -> tuple[str, ...]:
+    if not isinstance(value, list) or (not value and not allow_empty):
+        raise UsageError(f"batch plan {label} is invalid")
+    items: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or item == "":
+            raise UsageError(f"batch plan {label} is invalid")
+        items.append(item)
+    return tuple(items)
+
+
+def _plan_text(value: object, label: str) -> str:
+    if not isinstance(value, str) or value == "":
+        raise UsageError(f"batch plan {label} is invalid")
+    return value
+
+
+def _plan_optional_text(value: object, label: str) -> str | None:
+    if value is None:
+        return None
+    return _plan_text(value, label)
+
+
+def _plan_int(value: object, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise UsageError(f"batch plan {label} is invalid")
+    return value
+
+
+def _plan_float(value: object, label: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise UsageError(f"batch plan {label} is invalid")
+    return float(value)
+
+
+def _plan_optional_float(value: object, label: str) -> float | None:
+    if value is None:
+        return None
+    return _plan_float(value, label)
+
+
+def _plan_optional_int(value: object, label: str) -> int | None:
+    if value is None:
+        return None
+    number = _plan_int(value, label)
+    if number < 1:
+        raise UsageError(f"batch plan {label} is invalid")
+    return number
 
 
 def _models(settings: Settings) -> int:
@@ -763,23 +1191,26 @@ def _optional_catalog(settings: Settings) -> dict[str, ModelRecord] | None:
 
 
 def _bounds(
-    batch: Batch,
+    cells: Sequence[Cell],
     settings: Settings,
     catalog: Mapping[str, ModelRecord] | None,
 ) -> tuple[int, float | None]:
     tokens = 0
     cost = 0.0
     priced = True
-    for seed in batch.seeds:
-        for condition in batch.conditions:
-            step_tokens, step_cost = _bound_run(
-                seed.text, condition, settings, catalog, seed.claims
-            )
-            tokens += step_tokens * settings.repeats
-            if step_cost is None:
-                priced = False
-            else:
-                cost += step_cost * settings.repeats
+    for cell in cells:
+        step_tokens, step_cost = _bound_run(
+            cell.seed.text,
+            cell.condition,
+            settings,
+            catalog,
+            cell.seed.claims,
+        )
+        tokens += step_tokens
+        if step_cost is None:
+            priced = False
+        else:
+            cost += step_cost
     if not priced:
         return tokens, None
     return tokens, cost
@@ -910,16 +1341,62 @@ def _on_step(*, verbose: bool) -> Callable[[StepNote], None]:
 
 
 def _report(directory: Path, reason: TerminationReason) -> int:
-    message = f"{reason}: results saved to {directory}"
+    message = _status_line(directory, reason)
     if reason in {"max_cycles", "threshold"}:
         print(message)
         return 0
     print(message, file=sys.stderr)
-    if reason == "budget_exceeded":
+    if reason in {"budget_exceeded", "insufficient_credits"}:
         return _EXIT_BUDGET
     if reason == "interrupted":
         return _EXIT_INTERRUPTED
     return 1
+
+
+def _status_line(directory: Path, reason: TerminationReason) -> str:
+    manifest = read_manifest(directory)
+    rule = manifest["stop_rule"]
+    last, scores = _chain_scores(directory / "chain.jsonl")
+    detail = f"{reason} at step {last} of {manifest['max_cycles']}"
+    if reason == "max_cycles":
+        found = degradation_step(scores, rule["threshold"], rule["consecutive"])
+        if found is None:
+            detail = f"{detail}, threshold not reached"
+        else:
+            detail = f"{detail}, threshold at step {found}"
+    return f"{detail}: results saved to {directory}"
+
+
+def _chain_scores(path: Path) -> tuple[int, tuple[tuple[int, float | None], ...]]:
+    if not path.is_file():
+        return 0, ()
+    scores: list[tuple[int, float | None]] = []
+    last = 0
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.strip() == "":
+            continue
+        try:
+            parsed: object = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(parsed, dict):
+            continue
+        step = parsed.get("step")
+        if isinstance(step, bool) or not isinstance(step, int):
+            continue
+        last = max(last, step)
+        scores.append((step, _fidelity(parsed.get("judge"))))
+    scores.sort()
+    return last, tuple(scores)
+
+
+def _fidelity(judge: object) -> float | None:
+    if not isinstance(judge, dict):
+        return None
+    raw = judge.get("fidelity_vs_seed")
+    if isinstance(raw, bool) or not isinstance(raw, int | float):
+        return None
+    return float(raw)
 
 
 def _configure_logging() -> None:
