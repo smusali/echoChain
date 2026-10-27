@@ -36,7 +36,12 @@ def notes(text: str, version: str) -> str:
     match = pattern.search(text)
     if match is None:
         raise ValueError(f"changelog has no section for {number}")
-    return match.group(1).strip()
+    body = match.group(1).strip()
+    policy = (
+        "Versioning policy: "
+        f"https://github.com/smusali/echoChain/blob/v{number}/README.md#stability"
+    )
+    return f"{body}\n\n{policy}"
 
 
 def main(argv: list[str] | None = None) -> int:

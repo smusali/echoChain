@@ -5,6 +5,8 @@ and this project uses [semantic versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-27
+
 ### Added
 
 - Subcommands `run`, `config show`, `models`, `export`, and `analyze`, with `echochain --start` kept as `echochain run --start`.
@@ -57,5 +59,6 @@ and this project uses [semantic versioning](https://semver.org/spec/v2.0.0.html)
 - `--help` and `--version` work without an API key.
 - Configured model ids are checked against the OpenRouter catalog before a paid call.
 
-[Unreleased]: https://github.com/smusali/echoChain/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/smusali/echoChain/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/smusali/echoChain/releases/tag/v0.2.0
 [0.1.0]: https://github.com/smusali/echoChain/releases/tag/v0.1.0
