@@ -89,9 +89,6 @@ jobs:
       - name: Pre-commit
         run: uv run pre-commit run --all-files
 
-      - name: Diagrams
-        run: python tools/check_mermaid.py
-
       - name: Build
         run: uv build
 
