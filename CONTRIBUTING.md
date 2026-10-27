@@ -107,6 +107,33 @@ You can also put the key in `.env`. Copy [`.env.example`](.env.example) and fill
 
 Dependabot opens weekly pull requests for the locked Python dependencies and for GitHub Actions. CI runs `pip-audit` against that lock file. The check fails when a pinned dependency has a known advisory.
 
+## Labels
+
+GitHub's default labels already have descriptions. Leave that text as it is. These project labels are the ones whose descriptions are still empty:
+
+- `packaging`: rename, packaging, and release work
+- `correctness`: a change that can make a reported number wrong
+- `research`: study design, validation, results, and methodology
+- `v0.1.0` through `v1.0.0`: the release an issue ships in
+
+## After merge
+
+The paid study, the Zenodo switch, and Discussions stay unrun until `docs/PREREGISTRATION.md` is on the default branch. The commands are in the README Results section. After that merge, apply the empty label descriptions with the text above:
+
+```bash
+gh label edit packaging --description "rename, packaging, and release work"
+gh label edit correctness --description "a change that can make a reported number wrong"
+gh label edit research --description "study design, validation, results, and methodology"
+gh label edit v0.1.0 --description "the release an issue ships in"
+gh label edit v0.2.0 --description "the release an issue ships in"
+gh label edit v0.3.0 --description "the release an issue ships in"
+gh label edit v0.4.0 --description "the release an issue ships in"
+gh label edit v0.5.0 --description "the release an issue ships in"
+gh label edit v1.0.0 --description "the release an issue ships in"
+```
+
+Enable Discussions only when that page should exist, then add the contact link. The command is `gh api -X PATCH repos/smusali/echoChain -f has_discussions=true`.
+
 ## Report an issue
 
 - Use a descriptive title.

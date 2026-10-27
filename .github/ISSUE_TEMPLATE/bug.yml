@@ -1,0 +1,19 @@
+name: Bug
+description: Report a defect in echoChain.
+title: "bug: "
+labels:
+  - bug
+body:
+  - type: textarea
+    id: steps
+    attributes:
+      label: What happened
+      description: Include the command, the Python version, the operating system, and the error text. Leave the API key out.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true

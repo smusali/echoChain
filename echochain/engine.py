@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import NamedTuple
 
+from echochain.baseline import TextScorer, lexical_scorer, measure
 from echochain.client import (
     ChatClient,
     ChatMessage,
@@ -64,6 +65,7 @@ class _Run:
     recorder: Recorder
     run_id: str
     current: str
+    scorer: TextScorer
     previous_answer: str | None = None
     failures: int = 0
     streak: int = 0
@@ -92,13 +94,14 @@ class _Step:
     reply: Completion
 
 
-def cycle(
+def cycle(  # noqa: PLR0913
     seed: str,
     recorder: Recorder,
     client: ChatClient,
     *,
     run_id: str,
     spec: RunSpec | None = None,
+    scorer: TextScorer | None = None,
 ) -> TerminationReason:
     """Run one chain until a stop rule, a failure, or the budget.
 
@@ -110,6 +113,7 @@ def cycle(
         spec: Condition, schedule, budget, and stop rule. Defaults to a
             fixed-length alternating run. `start_step` and `opening_text`
             continue a chain that already has stored steps.
+        scorer: Embedding and entailment scorer. None leaves those fields null.
 
     Returns:
         Why the run stopped.
@@ -124,6 +128,7 @@ def cycle(
         run_id=run_id,
         current=seed if plan.opening_text is None else plan.opening_text,
         previous_answer=plan.previous_answer,
+        scorer=lexical_scorer() if scorer is None else scorer,
     )
     if state.spending.blocked():
         return "budget_exceeded"
@@ -231,7 +236,7 @@ def _previous(
 
 
 def _record(state: _Run, step: _Step, judged: _Judged) -> None:
-    _log(state.recorder, step, judged)
+    _log(state, step, judged)
     _notify(state, step, judged)
 
 
@@ -351,7 +356,7 @@ def _described(plan: RunSpec, text: _Text, reply: Completion) -> _Step:
     )
 
 
-def _log(recorder: Recorder, step: _Step, judged: _Judged) -> None:
+def _log(state: _Run, step: _Step, judged: _Judged) -> None:
     judge = _judge_record(
         step.score_kind,
         judged.seed,
@@ -387,9 +392,16 @@ def _log(recorder: Recorder, step: _Step, judged: _Judged) -> None:
         "cost": reply.usage.cost,
         "generation_id": reply.generation_id,
         "judge": judge,
+        "baseline": measure(
+            reply.text,
+            state.seed,
+            state.previous_answer,
+            kind=step.score_kind,
+            scorer=state.scorer,
+        ),
         "timestamp": utc_now(),
     }
-    recorder.log(row)
+    state.recorder.log(row)
 
 
 def _judge_record(

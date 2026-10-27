@@ -5,7 +5,7 @@ import math
 import random
 import statistics
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -14,6 +14,17 @@ _LOW = 0.025
 _HIGH = 0.975
 _Z = 1.96
 _HALF = 0.5
+_BASELINE_METRICS = (
+    "cosine_seed",
+    "cosine_prev",
+    "entail_seed_forward",
+    "entail_seed_backward",
+    "entail_prev_forward",
+    "entail_prev_backward",
+    "length_ratio",
+    "technical_survival",
+    "generic_share",
+)
 _METRICS = (
     "claim_fidelity",
     "claim_fidelity_vs_prev",
@@ -22,8 +33,19 @@ _METRICS = (
     "fidelity_vs_prev",
     "anchored",
     "anchored_vs_prev",
+    *_BASELINE_METRICS,
 )
-_CURVE_SERIES = ("claim_fidelity", "claim_fidelity_vs_prev")
+_PANELS = (
+    ("claim_fidelity", "claim fidelity", False),
+    ("cosine_seed", "cosine to the seed", False),
+    ("entail_seed_backward", "backward entailment", False),
+    ("technical_survival", "technical survival", False),
+    ("generic_share", "generic share", False),
+    ("length_ratio", "length ratio", True),
+)
+_ATTRACTOR_METRICS = ("generic_share", "length_ratio")
+_ATTRACTOR_RUNS = 3
+_ENDPOINTS = 2
 _COLORS = ("#1f4e79", "#b85c38", "#2f6f4e", "#6b4c9a")
 _CURVE_HEADER = (
     "condition",
@@ -383,8 +405,8 @@ def report(
         rng: Generator for the clustered bootstrap. None uses `random.Random(0)`.
 
     Returns:
-        The curves, survival, restricted mean, and comparison sections. Floats
-        use six decimals.
+        The curves, survival, restricted mean, comparison, and attractor
+        sections. Floats use six decimals.
 
     Raises:
         AnalyzeError: A directory is unreadable or the rubric versions differ.
@@ -400,11 +422,13 @@ def report(
     curves = _curve_lines(runs, generator)
     survival = _survival_lines(runs, survival_rng)
     comparisons = _comparison_lines(runs)
+    attractors = _attractor_lines(runs)
     text = "\n\n".join(
         (
             "curves\n" + "\n".join(curves),
             "survival\n" + "\n".join(survival),
             "comparisons\n" + "\n".join(comparisons),
+            "attractors\n" + "\n".join(attractors),
         )
     )
     rendered = text + "\n"
@@ -531,14 +555,27 @@ def _point(row: Mapping[str, object]) -> _Point:
     step = row.get("step")
     if isinstance(step, bool) or not isinstance(step, int) or step < 1:
         raise AnalyzeError("row step must be a positive integer")
-    judge = row.get("judge")
     values: dict[str, float] = {}
-    if isinstance(judge, dict):
-        for metric, field in _FIELD.items():
-            number = _optional_number(judge.get(field))
-            if number is not None:
-                values[metric] = number
+    _read_metrics(row.get("judge"), _FIELD.items(), values)
+    _read_metrics(
+        row.get("baseline"),
+        ((name, name) for name in _BASELINE_METRICS),
+        values,
+    )
     return _Point(step=step, values=values)
+
+
+def _read_metrics(
+    source: object,
+    fields: Iterable[tuple[str, str]],
+    values: dict[str, float],
+) -> None:
+    if not isinstance(source, dict):
+        return
+    for metric, field in fields:
+        number = _optional_number(source.get(field))
+        if number is not None:
+            values[metric] = number
 
 
 def _curve_lines(runs: Sequence[_Run], rng: random.Random) -> list[str]:
@@ -713,42 +750,99 @@ def _curves_svg(lines: Sequence[str]) -> str:
         for line in lines[1:]
         if len(fields := line.split("\t")) == len(_CURVE_HEADER)
     ]
-    frame = _frame()
-    left, top, plot_width, plot_height = frame[2:]
-    steps = [int(row[1]) for row in rows if row[2] in _CURVE_SERIES]
-    last = max(steps, default=1)
-    parts = _frame_markup(frame)
-    parts.append(_label("48", "24", "14", "#222222", "claim fidelity"))
-    seen: list[str] = []
-    for row in rows:
-        if row[2] not in _CURVE_SERIES or row[0] in seen:
-            continue
-        seen.append(row[0])
-    for series_index, metric in enumerate(_CURVE_SERIES):
-        for color_index, condition in enumerate(seen):
-            matching = [row for row in rows if row[0] == condition and row[2] == metric]
-            if not matching:
-                continue
-            coords = " ".join(
-                f"{_x(int(row[1]), last, left, plot_width):.2f},"
-                f"{_y(float(row[4]), top, plot_height):.2f}"
-                for row in matching
-            )
-            parts.append(
-                _polyline(_COLORS[color_index % len(_COLORS)], coords, series_index > 0)
-            )
-    for index, condition in enumerate(seen):
-        parts.append(
-            _label(
-                "560",
-                str(24 + index * 16),
-                "12",
-                _COLORS[index % len(_COLORS)],
-                condition,
-            )
-        )
+    width = 720
+    panel_height = 120
+    height = panel_height * len(_PANELS)
+    parts = [
+        _open(
+            "svg",
+            (
+                ("xmlns", "http://www.w3.org/2000/svg"),
+                ("width", str(width)),
+                ("height", str(height)),
+                ("viewBox", f"0 0 {width} {height}"),
+            ),
+        ),
+        _void("rect", (("width", "100%"), ("height", "100%"), ("fill", "#ffffff"))),
+    ]
+    seen = _conditions(rows)
+    for index, (metric, title, ratio) in enumerate(_PANELS):
+        _draw_panel(parts, rows, seen, (metric, title, ratio, index * panel_height))
     parts.append("</svg>")
     return "".join(parts)
+
+
+def _conditions(rows: Sequence[Sequence[str]]) -> list[str]:
+    seen: list[str] = []
+    for row in rows:
+        if row[0] not in seen:
+            seen.append(row[0])
+    return seen
+
+
+def _draw_panel(
+    parts: list[str],
+    rows: Sequence[Sequence[str]],
+    seen: Sequence[str],
+    panel: tuple[str, str, bool, int],
+) -> None:
+    metric, title, ratio, offset = panel
+    left = 48
+    top = offset + 28
+    plot_width = 460
+    plot_height = 80
+    matching = [row for row in rows if row[2] == metric]
+    last = max((int(row[1]) for row in matching), default=1)
+    high = 1.0
+    if ratio:
+        observed = max((float(row[4]) for row in matching), default=high)
+        high = max(high, observed)
+    parts.extend(
+        (
+            _void(
+                "line",
+                (
+                    ("x1", str(left)),
+                    ("y1", str(top)),
+                    ("x2", str(left)),
+                    ("y2", str(top + plot_height)),
+                    ("stroke", "#222222"),
+                ),
+            ),
+            _void(
+                "line",
+                (
+                    ("x1", str(left)),
+                    ("y1", str(top + plot_height)),
+                    ("x2", str(left + plot_width)),
+                    ("y2", str(top + plot_height)),
+                    ("stroke", "#222222"),
+                ),
+            ),
+            _label("48", str(offset + 16), "12", "#222222", title),
+        )
+    )
+    for color_index, condition in enumerate(seen):
+        series = [row for row in matching if row[0] == condition]
+        if not series:
+            continue
+        coords = " ".join(
+            f"{_x(int(row[1]), last, left, plot_width):.2f},"
+            f"{_y_span(float(row[4]), top, plot_height, high):.2f}"
+            for row in series
+        )
+        parts.append(_polyline(_COLORS[color_index % len(_COLORS)], coords, False))
+    if offset == 0:
+        for index, condition in enumerate(seen):
+            parts.append(
+                _label(
+                    "530",
+                    str(16 + index * 14),
+                    "12",
+                    _COLORS[index % len(_COLORS)],
+                    condition,
+                )
+            )
 
 
 def _survival_svg(runs: Sequence[_Run]) -> str:
@@ -863,8 +957,63 @@ def _x(step: int, last: int, left: int, width: int) -> float:
 
 
 def _y(value: float, top: int, height: int) -> float:
-    clipped = min(1.0, max(0.0, value))
-    return top + (1.0 - clipped) * height
+    return _y_span(value, top, height, 1.0)
+
+
+def _y_span(value: float, top: int, height: int, high: float) -> float:
+    span = high if high > 0.0 else 1.0
+    clipped = min(span, max(0.0, value))
+    return top + (1.0 - clipped / span) * height
+
+
+def _attractor_lines(runs: Sequence[_Run]) -> list[str]:
+    lines = ["condition\tmetric\tslope\tstrength\tposition"]
+    grouped = _by_condition(runs)
+    for condition in sorted(grouped):
+        for metric in _ATTRACTOR_METRICS:
+            pairs = [
+                ends
+                for run in grouped[condition]
+                if (ends := _ends(run, metric)) is not None
+            ]
+            fit = _fit(pairs)
+            if fit is None:
+                lines.append(f"{condition}\t{metric}\tnot estimated")
+                continue
+            slope, strength, position = fit
+            lines.append(
+                f"{condition}\t{metric}\t{_fmt(slope)}\t{_fmt(strength)}\t"
+                f"{_fmt(position)}"
+            )
+    return lines
+
+
+def _ends(run: _Run, metric: str) -> tuple[float, float] | None:
+    observed = [point.values[metric] for point in run.points if metric in point.values]
+    if len(observed) < _ENDPOINTS:
+        return None
+    return observed[0], observed[-1]
+
+
+def _fit(pairs: Sequence[tuple[float, float]]) -> tuple[float, float, float] | None:
+    if len(pairs) < _ATTRACTOR_RUNS:
+        return None
+    initials = [pair[0] for pair in pairs]
+    finals = [pair[1] for pair in pairs]
+    mean_initial = statistics.mean(initials)
+    mean_final = statistics.mean(finals)
+    variance = sum((value - mean_initial) ** 2 for value in initials)
+    if variance == 0.0:
+        return None
+    slope = (
+        sum((initial - mean_initial) * (final - mean_final) for initial, final in pairs)
+        / variance
+    )
+    if not -1.0 < slope < 1.0:
+        return None
+    strength = 1.0 - slope
+    intercept = mean_final - slope * mean_initial
+    return slope, strength, intercept / strength
 
 
 def _xml(text: str) -> str:

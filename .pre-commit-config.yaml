@@ -19,3 +19,4 @@ repos:
           - pytest-socket==0.8.1
           - jsonschema==4.26.0
           - types-jsonschema==4.26.0.20261006
+          - hypothesis==6.170.12

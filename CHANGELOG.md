@@ -13,6 +13,7 @@ Next release is `0.2.0`, tracked in [Upgrade to v0.2.0](https://github.com/smusa
 
 ### Added
 
+- Answer steps record judge-free baseline metrics, and `echochain analyze` plots them beside claim fidelity. A pre-registered run hashes `docs/PREREGISTRATION.md` and requires the optional `baseline` extra. `CITATION.cff`, a code of conduct, issue forms, and a pull request template are included. The 90-run study, Zenodo, and Discussions are documented and not run.
 - `echochain analyze` prints the restricted mean of cycles to degradation up to `max_cycles`, with a seed-clustered bootstrap interval, the median or `not reached`, and the share of runs that degraded.
 - A credit refusal that outlasts the waits finishes the run with `insufficient_credits` and exit code 3. `echochain run --resume BATCH_ID` continues the unfinished cells, and `--dry-run` on that resume counts only those cells.
 - The final status line names the last recorded step, the planned length, and, for a cycle-cap stop, where the threshold was first met.

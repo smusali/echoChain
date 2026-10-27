@@ -179,7 +179,7 @@ Without a key, or when a model has no price, the cost line is `unknown`. A known
 Each run creates a directory `runs/<UTC>_<run id>/`:
 
 - `manifest.json`, written as soon as the run starts and replaced atomically when it finishes. `providers` lists each requested model with the provider that served it. `batch_id` and `repeat_index` name the cell inside a batch. An interrupt keeps `status` as `finished`, sets `termination_reason` to `interrupted`, and exits with code 130. A credit refusal that outlasts the waits also keeps `status` as `finished`, sets `termination_reason` to `insufficient_credits`, stores a one-line `error`, and exits with code 3. Any other catchable crash sets `status` to `failed` and stores a one-line `error`. A hard kill can still leave `status` as `running`, with each completed step already flushed to the JSONL.
-- `chain.jsonl`, one UTF-8 object per step. The object carries the run id, phase (`a2q`, `q2a`, `identity`, or `paraphrase`), condition, schedule, `score_kind`, requested and served model, provider, input and output text, prompt hash, finish reason, sampling parameters, latency, tokens, cost, generation id, judge samples, and a UTC timestamp. An answer step stores claim fidelity, the 1 to 10 mean, and the 1 to 5 mean against the seed. From the second answer onward it also stores those comparisons against the previous answer. A question step stores answerability on both scales. A failed judge sample stores a null score and an error code.
+- `chain.jsonl`, one UTF-8 object per step. The object carries the run id, phase (`a2q`, `q2a`, `identity`, or `paraphrase`), condition, schedule, `score_kind`, requested and served model, provider, input and output text, prompt hash, finish reason, sampling parameters, latency, tokens, cost, generation id, judge samples, a `baseline` object, and a UTC timestamp. An answer step stores claim fidelity, the 1 to 10 mean, and the 1 to 5 mean against the seed. From the second answer onward it also stores those comparisons against the previous answer. The baseline object stores the length ratio, technical-token survival, and the share of closed-class words. A pre-registered run also stores cosine and entailment against the seed, and against the previous answer from the second answer onward. A question step stores answerability on both scales and a baseline object whose values are null. A failed judge sample stores a null score and an error code. The manifest records the embedding and NLI revisions when those models ran, and the SHA-256 of the pre-registration file when one was set.
 
 [`Recorder`](https://github.com/smusali/echoChain/blob/main/echochain/persistence.py) writes those files. [`test_fake_cycle_records_served_model`](https://github.com/smusali/echoChain/blob/main/tests/test_cli.py) reads them. The manifest's token and cost totals are the sum of the JSONL rows, including judge calls. Schemas for both documents are in `schemas/`.
 
@@ -212,7 +212,8 @@ echoChain/
 │   ├── engine.py        # Telephone game orchestration
 │   ├── client.py        # OpenRouter API communication
 │   ├── judge.py         # Judge scoring
-│   ├── analyze.py       # Curves, survival, restricted means, and agreement
+│   ├── baseline.py      # Length, token survival, cosine, and entailment
+│   ├── analyze.py       # Curves, survival, restricted means, attractors, and agreement
 │   ├── prompts/         # Versioned Jinja2 templates
 │   ├── config.py        # Defaults, the experiment file, and the API key
 │   └── persistence.py   # Manifest and JSONL output
@@ -239,6 +240,36 @@ echoChain/
 [`results/pilot-2026-10/`](results/pilot-2026-10/) holds the manifests, the raw JSONL, the plot script, and a short reading of the finished runs. The planned pilot was 10 study seeds, the `alternate`, `swap`, and `same-model` arms, and three repeats (90 runs, 5,400 calls). The dry-run upper bound was $14.05. Five runs finished and spent $0.15 before OpenRouter returned HTTP 402, because the account could not reserve the configured 1,024 completion tokens. The chart is that fragment: three `alternate` repeats and two `swap` repeats of the Redis seed.
 
 ![Mean fidelity for the finished Redis runs](results/pilot-2026-10/fidelity.svg)
+
+### Full study
+
+Run this only after `docs/PREREGISTRATION.md` is on the default branch. It calls OpenRouter and spends money. Install the baseline models first so cosine and entailment are recorded:
+
+```bash
+uv sync --extra dev --extra baseline
+echochain --config examples/study.toml --dry-run
+echochain run --config examples/study.toml --out runs --yes
+```
+
+Pass `--budget` with a USD cap. Resume a credit stop with `echochain run --resume BATCH_ID --config examples/study.toml`. Before treating the batch as the study, check that `git log -1 --format=%cI docs/PREREGISTRATION.md` is earlier than the first manifest `started_at`, and that `preregistration_sha256` matches the file.
+
+Regenerate the figures from a fresh copy with `echochain analyze` on the archived run directories.
+
+Write the results note only after the runs exist. Cover the implementation, the challenges, the design decisions, which model combinations degrade fastest and slowest, the average cycles to degradation, how many runs finished, and how generative AI was used.
+
+Zenodo: enable the GitHub integration for `smusali/echoChain` before any future `v0.2.0` tag. It does not backfill `v0.1.0`. Deposit that release manually if the latest release needs a DOI before the next tag, then add the DOI to `CITATION.cff`. Deposit the study archive as its own Zenodo record and link it from this README.
+
+Discussions:
+
+```bash
+gh api -X PATCH repos/smusali/echoChain -f has_discussions=true
+```
+
+Then add a contact link in `.github/ISSUE_TEMPLATE/config.yml`.
+
+Labels: `gh label edit` for each custom label whose description is still empty, using the text in [CONTRIBUTING.md](CONTRIBUTING.md).
+
+An optional timestamp of `docs/PREREGISTRATION.md` on OSF or AsPredicted is separate from the hash stored on the manifest.
 
 ## Related work
 
@@ -267,9 +298,34 @@ A pin can limit that routing:
 
 OpenRouter can also enforce zero data retention for an account. If no provider accepts the pin, the call fails. The private vulnerability report path is [SECURITY.md](https://github.com/smusali/echoChain/blob/main/SECURITY.md).
 
+## How to cite
+
+Cite the software with [CITATION.cff](CITATION.cff):
+
+```yaml
+cff-version: 1.2.0
+message: If you use this software, please cite it using these metadata.
+title: echoChain
+type: software
+authors:
+  - given-names: Samir
+    family-names: Musali
+    email: samir.musali@gmail.com
+repository-code: https://github.com/smusali/echoChain
+license: MIT
+version: 0.1.0
+date-released: 2026-10-25
+```
+
+The Zenodo DOI is not minted yet.
+
 ## Documentation
 
 - [CONTRIBUTING.md](https://github.com/smusali/echoChain/blob/main/CONTRIBUTING.md): setup, offline tests, and the one paid smoke test
+- [docs/METHODOLOGY.md](docs/METHODOLOGY.md): what a run measures
+- [docs/PREREGISTRATION.md](docs/PREREGISTRATION.md): the frozen study design
+- [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md): Contributor Covenant 2.1
+- [CITATION.cff](CITATION.cff): citation metadata
 - [SECURITY.md](https://github.com/smusali/echoChain/blob/main/SECURITY.md): how to report a vulnerability privately
 - [CHANGELOG.md](https://github.com/smusali/echoChain/blob/main/CHANGELOG.md): release notes
 - [LICENSE](https://github.com/smusali/echoChain/blob/main/LICENSE): MIT License

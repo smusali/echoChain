@@ -10,6 +10,7 @@ import os
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import tomllib
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -22,6 +23,7 @@ from types import TracebackType
 import httpx2
 import pytest
 from echochain import __version__
+from echochain.baseline import empty_baseline
 from echochain.cli import main
 from echochain.client import (
     CallDeadlineError,
@@ -35,6 +37,8 @@ from echochain.client import (
     parse_catalog,
 )
 from echochain.config import (
+    ANCHORED_MAX,
+    ANCHORED_MIN,
     CALL_DEADLINE_SECONDS,
     CONFIRM_ABOVE_USD,
     JUDGE_ERROR_DENOMINATOR,
@@ -77,6 +81,7 @@ from echochain.design import (
 from echochain.engine import cycle
 from echochain.judge import parse_reply
 from echochain.persistence import (
+    EmptySeedError,
     ManifestDesign,
     Recorder,
     StepRecord,
@@ -91,6 +96,8 @@ from echochain.prompts import (
     template_bytes,
     template_hashes,
 )
+from hypothesis import example, given
+from hypothesis import strategies as st
 from jsonschema import Draft202012Validator
 from openai import APIStatusError
 from pytest_socket import SocketBlockedError
@@ -364,6 +371,7 @@ def _step(run_id: str, text: str) -> StepRecord:
             "prev_claim_fidelity": None,
             "prev_contradiction_rate": None,
         },
+        "baseline": empty_baseline(),
         "timestamp": "2026-01-02T03:04:05Z",
     }
 
@@ -901,6 +909,25 @@ def test_hostile_seeds_stay_inside_root(tmp_path: Path) -> None:
         assert resolved.parent == root.resolve()
 
 
+@given(st.text(max_size=80))
+@example("")
+@example("   ")
+@example("../../etc/passwd")
+@example("..\\..\\windows")
+@example("/tmp/outside")
+def test_run_directory_stays_inside_the_root(seed: str) -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        if seed.strip() == "":
+            with pytest.raises(EmptySeedError):
+                mk_exp_dir(seed, root)
+            return
+        made = mk_exp_dir(seed, root)
+        resolved = made.directory.resolve()
+        assert resolved.parent == root.resolve()
+        assert resolved.is_relative_to(root.resolve())
+
+
 def test_utf8_row_when_default_encoding_is_cp1252(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1106,6 +1133,19 @@ def _run_cycle(
     return reason, saved, finished
 
 
+def _spread(counts: Mapping[str, int]) -> int:
+    if not counts:
+        return 0
+    return max(counts.values()) - min(counts.values())
+
+
+def _positive_spread(counts: Mapping[str, int]) -> int:
+    positive = [value for value in counts.values() if value > 0]
+    if not positive:
+        return 0
+    return max(positive) - min(positive)
+
+
 def _pair_counts(
     schedule: str, models: tuple[str, ...], steps: int
 ) -> dict[tuple[str, str], int]:
@@ -1160,6 +1200,58 @@ def test_parse_reply(reply: str, score: int | None, error: str | None) -> None:
     if error is None:
         anchored = 4
         assert parsed.anchored == anchored
+
+
+@given(
+    reply=st.text(max_size=200),
+    built=st.tuples(
+        st.one_of(st.text(max_size=40), st.integers(min_value=-2, max_value=2)),
+        st.integers(min_value=-1, max_value=12),
+        st.integers(min_value=0, max_value=6),
+        st.booleans(),
+        st.booleans(),
+        st.booleans(),
+    ),
+)
+@example("not json", ("kept", 8, 4, False, False, True))
+@example("not json", ("kept", 8, 4, True, False, False))
+@example("not json", ("kept", 8, 4, False, True, False))
+@example("not json", ("kept", 0, 1, False, False, False))
+def test_parse_reply_accepts_only_a_complete_score(
+    reply: str,
+    built: tuple[str | int, int, int, bool, bool, bool],
+) -> None:
+    rationale, score, anchored, extra, as_bool, fence = built
+    parsed = parse_reply(reply)
+    if parsed.score is not None:
+        assert parsed.error is None
+        assert SCORE_MIN <= parsed.score <= SCORE_MAX
+        assert parsed.anchored is not None
+        assert ANCHORED_MIN <= parsed.anchored <= ANCHORED_MAX
+    payload: dict[str, object] = {
+        "rationale": rationale,
+        "score": True if as_bool else score,
+        "anchored": anchored,
+    }
+    if extra:
+        payload["note"] = 1
+    encoded = json.dumps(payload)
+    if fence:
+        encoded = f"```json\n{encoded}\n```"
+    scored = parse_reply(encoded)
+    valid = (
+        isinstance(rationale, str)
+        and not extra
+        and not as_bool
+        and SCORE_MIN <= score <= SCORE_MAX
+        and ANCHORED_MIN <= anchored <= ANCHORED_MAX
+    )
+    if valid:
+        assert scored.score == score
+        assert scored.anchored == anchored
+        assert scored.error is None
+        return
+    assert scored.score is None
 
 
 def test_empty_judge_reply_continues(tmp_path: Path) -> None:
@@ -1271,6 +1363,46 @@ def test_schedules_fill_the_design_matrix() -> None:
     latin_models = [model_for("latin", three, step) for step in range(1, 7)]
     assert alternate != latin_models
     assert model_for("alternate", ROTATING_MODELS, 1) == ROTATING_MODELS[0]
+
+
+@given(
+    steps=st.integers(min_value=1, max_value=MAX_CYCLES),
+    count=st.integers(min_value=1, max_value=6),
+    schedule=st.sampled_from(("alternate", "swap", "latin", "fixed", "factorial")),
+)
+@example(4, 2, "alternate")
+@example(2, 1, "factorial")
+@example(8, 2, "factorial")
+@example(18, 3, "factorial")
+@example(1, 3, "latin")
+@example(1, 2, "fixed")
+def test_schedules_balance_model_counts(steps: int, count: int, schedule: str) -> None:
+    models = tuple(f"m{index}" for index in range(count))
+    if schedule == "fixed":
+        for step in range(1, steps + 1):
+            assert model_for("fixed:only", models, step) == "only"
+        return
+    totals = dict.fromkeys(models, 0)
+    phases = {
+        "a2q": dict.fromkeys(models, 0),
+        "q2a": dict.fromkeys(models, 0),
+    }
+    for step in range(1, steps + 1):
+        model = model_for(schedule, models, step)
+        assert model in models
+        totals[model] += 1
+        phases[phase_for("telephone", step)][model] += 1
+    if schedule in {"alternate", "swap"}:
+        assert _spread(totals) <= 1
+        assert _positive_spread(phases["a2q"]) <= 1
+        assert _positive_spread(phases["q2a"]) <= 1
+    if schedule == "latin":
+        assert _spread(phases["a2q"]) <= 1
+        assert _spread(phases["q2a"]) <= 1
+    if schedule == "factorial" and steps == 2 * count * count:
+        assert len(set(phases["a2q"].values())) == 1
+        assert len(set(phases["q2a"].values())) == 1
+        assert phases["a2q"][models[0]] > 0
 
 
 def test_conditions_are_labeled(
@@ -1894,6 +2026,17 @@ _PRECEDENCE: tuple[tuple[object, ...], ...] = (
         "ECHOCHAIN_SEEDS",
         "from-env",
         {"seeds": Path("from-flag")},
+        ("path", "from-file"),
+        Path("from-env"),
+        Path("from-flag"),
+        None,
+    ),
+    (
+        "preregistration",
+        'preregistration = "from-file"\n',
+        "ECHOCHAIN_PREREGISTRATION",
+        "from-env",
+        {"preregistration": Path("from-flag")},
         ("path", "from-file"),
         Path("from-env"),
         Path("from-flag"),

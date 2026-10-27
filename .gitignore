@@ -15,6 +15,7 @@ pip-log.txt
 pip-delete-this-directory.txt
 .coverage
 .coverage.*
+.hypothesis/
 
 # Django stuff:
 *.log

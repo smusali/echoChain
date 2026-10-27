@@ -23,6 +23,7 @@
     "cost",
     "generation_id",
     "judge",
+    "baseline",
     "timestamp"
   ],
   "$defs": {
@@ -178,6 +179,32 @@
         },
         "prev_claim_fidelity": {"type": ["number", "null"]},
         "prev_contradiction_rate": {"type": ["number", "null"]}
+      }
+    },
+    "baseline": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cosine_seed",
+        "cosine_prev",
+        "entail_seed_forward",
+        "entail_seed_backward",
+        "entail_prev_forward",
+        "entail_prev_backward",
+        "length_ratio",
+        "technical_survival",
+        "generic_share"
+      ],
+      "properties": {
+        "cosine_seed": {"type": ["number", "null"]},
+        "cosine_prev": {"type": ["number", "null"]},
+        "entail_seed_forward": {"type": ["number", "null"]},
+        "entail_seed_backward": {"type": ["number", "null"]},
+        "entail_prev_forward": {"type": ["number", "null"]},
+        "entail_prev_backward": {"type": ["number", "null"]},
+        "length_ratio": {"type": ["number", "null"]},
+        "technical_survival": {"type": ["number", "null"]},
+        "generic_share": {"type": ["number", "null"]}
       }
     },
     "timestamp": {"type": "string", "format": "date-time"}

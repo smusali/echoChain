@@ -216,6 +216,7 @@ class Settings:
     condition: tuple[str, ...]
     providers: tuple[tuple[str, ProviderPin], ...]
     seeds: Path | None
+    preregistration: Path | None
     seed: str | None
     split: str | None
     start: str | None
@@ -230,7 +231,7 @@ class _Bound:
 
 
 _SELECTORS = ("start", "seed", "split")
-_PATHS = frozenset({"out", "seeds"})
+_PATHS = frozenset({"out", "seeds", "preregistration"})
 _LISTS = frozenset({"models", "judge", "condition", "required_parameters"})
 _INTEGERS = frozenset(
     {
@@ -294,6 +295,7 @@ _ENV = {
     "confirm_above_usd": "ECHOCHAIN_CONFIRM_ABOVE",
     "condition": "ECHOCHAIN_CONDITION",
     "seeds": "ECHOCHAIN_SEEDS",
+    "preregistration": "ECHOCHAIN_PREREGISTRATION",
     "seed": "ECHOCHAIN_SEED",
     "split": "ECHOCHAIN_SPLIT",
     "start": "ECHOCHAIN_START",
@@ -327,6 +329,7 @@ _FLAGS = {
     "confirm_above_usd": "--confirm-above",
     "condition": "--condition",
     "seeds": "--seeds",
+    "preregistration": "--preregistration",
     "seed": "--seed",
     "split": "--split",
     "start": "--start",
@@ -716,6 +719,7 @@ def _finalize(bounds: dict[str, _Bound]) -> Settings:
         condition=_need_strings(bounds, "condition"),
         providers=_need_pins(bounds["providers"]),
         seeds=_optional_path(bounds, "seeds"),
+        preregistration=_optional_path(bounds, "preregistration"),
         seed=_optional_str(bounds, "seed"),
         split=_optional_str(bounds, "split"),
         start=_optional_str(bounds, "start"),
@@ -764,6 +768,11 @@ def _payload(settings: Settings) -> dict[str, object]:
         "score_min": settings.score_min,
         "seed": settings.seed,
         "seeds": None if settings.seeds is None else settings.seeds.as_posix(),
+        "preregistration": (
+            None
+            if settings.preregistration is None
+            else settings.preregistration.as_posix()
+        ),
         "split": settings.split,
         "start": settings.start,
         "stop_consecutive": settings.stop_consecutive,

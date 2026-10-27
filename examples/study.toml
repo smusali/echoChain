@@ -1,4 +1,5 @@
 seeds = "../seeds/v1.toml"
+preregistration = "../docs/PREREGISTRATION.md"
 split = "study"
 condition = ["alternate", "swap", "same-model"]
 repeats = 3
