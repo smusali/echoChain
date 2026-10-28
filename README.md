@@ -2,17 +2,6 @@
 
 echoChain measures how an answer changes when models rewrite it in a loop.
 
-```mermaid
-flowchart LR
-  S["Seed text"] --> Q["a2q: ask"]
-  Q --> A["q2a: answer"]
-  A --> J["Judge vs seed"]
-  J --> R["Write JSONL row"]
-  R --> C{"Stop?"}
-  C -->|"no"| Q
-  C -->|"yes"| M["Write manifest"]
-```
-
 ## Install
 
 ```bash
