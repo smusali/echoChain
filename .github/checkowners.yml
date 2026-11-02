@@ -7,4 +7,6 @@ policy:
 
 contributors:
   exclude:
+    - "@cursoragent"
+    - cursoragent@cursor.com
     - noreply@anthropic.com
