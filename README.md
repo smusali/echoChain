@@ -46,6 +46,7 @@ Before 1.0.0, an incompatible change bumps the minor version and is listed in th
 
 ## More
 
+- [Documentation](https://smusali.github.io/echoChain/)
 - [Methodology](https://github.com/smusali/echoChain/blob/main/docs/METHODOLOGY.md)
 - [Contributing](https://github.com/smusali/echoChain/blob/main/docs/CONTRIBUTING.md)
 - [Example config](https://github.com/smusali/echoChain/blob/main/examples/echochain.toml)

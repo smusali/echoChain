@@ -10,6 +10,13 @@ uv run pre-commit run --all-files
 
 Tests call the client through an `httpx2.MockTransport`. A live cycle is `tools/smoke.sh`, and it skips when `OPENROUTER_API_KEY` is unset.
 
+The documentation site uses the `docs` group:
+
+```bash
+uv sync --group docs && uv run mkdocs build --strict
+uv run mkdocs serve
+```
+
 ## Changes
 
 Use a short commit subject:
@@ -47,6 +54,7 @@ flowchart TD
 1. Update `__version__` and `docs/CHANGELOG.md`.
 2. Tag `vX.Y.Z` on `main`.
 3. Publish the GitHub release. The release workflow builds the package and publishes it.
+4. The docs workflow deploys that version and points `latest` at it.
 
 ## Markdown
 
