@@ -1,0 +1,12 @@
+policy:
+  drift:
+    fail: true
+  single_expert:
+    fail: false
+    severity: warning
+
+contributors:
+  exclude:
+    - "@cursoragent"
+    - cursoragent@cursor.com
+    - noreply@anthropic.com
